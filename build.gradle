@@ -2,8 +2,8 @@ import compiler.NativeImage
 
 plugins {
   id 'compiler.native-image'
-  id 'com.github.johnrengelman.shadow' version '7.1.2'
-  id 'com.palantir.git-version' version '0.13.0'
+  id 'com.github.johnrengelman.shadow' version '8.1.1'
+  id 'com.palantir.git-version' version '1.0.0'
 }
 
 apply plugin: 'scala'
@@ -18,7 +18,7 @@ repositories {
 
 ext {
     scala_maj = '2.13'
-    scala_ver = "${scala_maj}.10"
+    scala_ver = "${scala_maj}.12"
 }
 
 dependencies {
@@ -79,12 +79,12 @@ compileScala {
       , "-Xsource:3"
       , "-opt:inline:cdb.**"
       , "-release"
-      , "17"
+      , "20"
     ]
 }
 
 shadowJar {
-    classifier = ''
+    archiveClassifier = ''
     manifest {
         attributes 'App-Version': gitVersion()
     }
