@@ -1,0 +1,37 @@
+# To build and test image run `docker build -f Dockerfile.jvm --tag scalarometer:latest .`
+
+ARG OPENJDK_VERSION=25
+ARG OPENJDK_WORKDIR=/openjdk/src/project
+
+FROM eclipse-temurin:${OPENJDK_VERSION}-jdk-alpine AS build
+
+ARG GRADLE_VERSION=9.9.2
+ARG OPENJDK_WORKDIR=/openjdk/src/project
+
+RUN apk update \
+ && apk add --no-cache wget unzip \
+ && wget -q "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" -P /tmp \
+ && unzip -q -d /opt "/tmp/gradle-${GRADLE_VERSION}-bin.zip" \
+ && rm "/tmp/gradle-${GRADLE_VERSION}-bin.zip"
+
+ENV GRADLE_HOME=/opt/gradle-${GRADLE_VERSION}
+ENV PATH=${GRADLE_HOME}/bin:${PATH}
+ENV JAVA_TOOL_OPTIONS="--sun-misc-unsafe-memory-access=allow --enable-native-access=ALL-UNNAMED"
+
+WORKDIR ${OPENJDK_WORKDIR}
+
+COPY . ${OPENJDK_WORKDIR}
+RUN ${GRADLE_HOME}/bin/gradle --no-daemon clean test jar shadowJar --warning-mode all
+
+FROM eclipse-temurin:${OPENJDK_VERSION}-jre-alpine AS scalarometer
+
+ARG OPENJDK_WORKDIR=/openjdk/src/project
+
+LABEL org.opencontainers.image.title="scalarometer" \
+      org.opencontainers.image.description="Scala 3 LTS metrics and telemetry library (JVM artifacts)"
+
+ENV SCALAROMETER_HOME=/opt/scalarometer
+
+WORKDIR ${SCALAROMETER_HOME}
+
+COPY --from=build ${OPENJDK_WORKDIR}/build/libs/scalarometer-*.jar ${SCALAROMETER_HOME}/

@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check script syntax
+        run: bash -n scripts/docker-build && bash -n docker-build-test.sh
+      - name: Build toolchain image (GraalVM + Gradle)
+        env:
+          DOCKER_BUILDKIT: "1"
+        run: docker build -t graalvm-dev:latest -f docker/ci-toolchain.Dockerfile .
+      - name: Build and test
+        env:
+          MEMORY: 6gb
+        run: ./scripts/docker-build gradle --no-daemon clean test jar shadowJar --warning-mode all
+      - uses: actions/upload-artifact@v4
+        with:
+          name: scalarometer-jars
+          path: build/libs/scalarometer-*.jar
+          if-no-files-found: error

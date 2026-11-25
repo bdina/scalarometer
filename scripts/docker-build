@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+MEMORY="${MEMORY:-8gb}"
+GIT_PROJECT="${PWD##*/}"
+IMAGE="${IMAGE:-graalvm-dev}"
+TAG="${TAG:-latest}"
+
+mkdir -p "${PWD}/.gradle-docker" "${PWD}/.gradle-project-docker"
+
+run_docker() {
+  local it_flags="$1"
+  shift
+  docker run --name "${GIT_PROJECT}-build-$(date +%s)-$$" \
+    -e JAVA_TOOL_OPTIONS="--sun-misc-unsafe-memory-access=allow --enable-native-access=ALL-UNNAMED" \
+    -e GRADLE_USER_HOME="/git/${GIT_PROJECT}/.gradle-docker" \
+    -e GRADLE_OPTS="-Dorg.gradle.projectcachedir=/git/${GIT_PROJECT}/.gradle-project-docker" \
+    ${it_flags} \
+    --rm \
+    -v "${PWD}:/git/${GIT_PROJECT}/" \
+    -w "/git/${GIT_PROJECT}" \
+    --memory="${MEMORY}" \
+    "${IMAGE}:${TAG}" \
+    "$@"
+}
+
+if [ "$#" -eq 0 ]; then
+  run_docker "-it" bash
+else
+  quoted=$(printf '%q ' "$@")
+  run_docker "-i" bash -lc "${quoted% }"
+fi

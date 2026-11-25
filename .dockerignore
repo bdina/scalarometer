@@ -1,0 +1,13 @@
+.gradle/
+.gradle-docker/
+.gradle-project-docker/
+build/
+buildSrc/build/
+buildSrc/.gradle/
+.cursor/
+**/*.iml
+.idea/
+.tags
+**/.tags
+docs/
+*.md

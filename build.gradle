@@ -1,105 +1,152 @@
-import compiler.NativeImage
+import org.gradle.api.tasks.testing.TestDescriptor
+import org.gradle.api.tasks.testing.TestListener
+import org.gradle.api.tasks.testing.TestResult
+
+buildscript {
+  repositories {
+    mavenCentral()
+  }
+  dependencies {
+    constraints {
+      classpath('org.eclipse.jgit:org.eclipse.jgit:6.10.1.202505221210-r') {
+        because 'mitigate JGit CVEs while staying on pure-Java JGit (no git CLI in graalvm-dev)'
+      }
+      classpath('com.google.guava:guava:33.8.0-jre') {
+        because 'mitigate Guava CVEs pulled by git-version 1.0.0'
+      }
+    }
+  }
+}
 
 plugins {
+  id 'scala'
+  id 'java-library'
+  id 'maven-publish'
   id 'compiler.native-image'
-  id 'com.github.johnrengelman.shadow' version '8.1.1'
+  id 'com.gradleup.shadow' version '9.6.1'
   id 'com.palantir.git-version' version '1.0.0'
 }
 
-apply plugin: 'scala'
-apply plugin: 'application'
+group = 'com.scalarometer'
+version = gitVersion()
 
 repositories {
-    mavenCentral()
-    maven {
-        url 'https://mvnrepository.com/artifact'
-    }
+  mavenCentral()
+}
+
+configurations {
+  replCompiler
 }
 
 ext {
-    scala_maj = '2.13'
-    scala_ver = "${scala_maj}.12"
+  scala_maj = '3'
+  scala_ver = "${scala_maj}.9.0"
+  scala_test = '3.2.20'
 }
 
 dependencies {
-    implementation group: 'org.scala-lang' , name: 'scala-library'  , version: scala_ver
-    implementation group: 'org.scala-lang' , name: 'scala-compiler' , version: scala_ver
+  api "org.scala-lang:scala${scala_maj}-library_${scala_maj}:${scala_ver}"
+  replCompiler "org.scala-lang:scala${scala_maj}-compiler_${scala_maj}:${scala_ver}"
 
-    testImplementation group: 'org.scalatest', name: "scalatest_${scala_maj}", version: '3.2.9'
-    testImplementation group: 'org.scalactic', name: "scalactic_${scala_maj}", version: '3.2.9'
+  testImplementation "org.scalatest:scalatest_${scala_maj}:${scala_test}"
+  testImplementation "org.scalactic:scalactic_${scala_maj}:${scala_test}"
 
-    testImplementation group: 'junit', name: 'junit', version: '4.13.2'
-    testImplementation group: 'org.scalatestplus', name: "junit-4-13_${scala_maj}", version: '3.2.9.0'
+  testImplementation 'junit:junit:4.13.2'
+  testImplementation "org.scalatestplus:junit-4-13_${scala_maj}:${scala_test}.0"
 }
 
-version gitVersion()
-
-application {
-    mainClass.set("cdb.dump")
+java {
+  withSourcesJar()
 }
 
 processResources {
-    duplicatesStrategy = DuplicatesStrategy.INCLUDE // allow duplicates
-}
-
-sourceSets {
-    main {
-        scala {
-            srcDir 'src/main'
-        }
-        resources {
-            srcDir 'src/main/resources'
-            exclude '**/*.sample'
-        }
-    }
+  duplicatesStrategy = DuplicatesStrategy.INCLUDE
+  exclude '**/*.sample'
 }
 
 test {
-    testLogging.showStandardStreams = true
-    testLogging.exceptionFormat = 'full'
-    minHeapSize = "2g"
-    maxHeapSize = "6g"
+  useJUnit()
+  jvmArgs '--sun-misc-unsafe-memory-access=allow', '-XX:+UseCompactObjectHeaders'
+  testLogging {
+    events 'passed', 'skipped', 'failed'
+    showStandardStreams = false
+    exceptionFormat = 'full'
+  }
+  addTestListener(new TestListener() {
+    void beforeSuite(TestDescriptor suite) {}
+    void afterSuite(TestDescriptor suite, TestResult result) {
+      if (suite.parent == null) {
+        println "\nTest result: ${result.resultType}"
+        println "Tests: ${result.testCount}, succeeded: ${result.successfulTestCount}, failed: ${result.failedTestCount}, skipped: ${result.skippedTestCount}"
+        println "Time: ${(result.endTime - result.startTime) / 1000.0} s"
+      }
+    }
+    void beforeTest(TestDescriptor testDescriptor) {}
+    void afterTest(TestDescriptor testDescriptor) {}
+  })
 }
 
-task repl(type:JavaExec) {
-    mainClass = "scala.tools.nsc.MainGenericRunner"
-    classpath = sourceSets.main.runtimeClasspath
-    standardInput System.in
-    args '-usejavacp'
+tasks.register('repl', JavaExec) {
+  group = 'application'
+  description = 'Starts a Scala 3 REPL with the library runtime classpath'
+  mainClass = 'dotty.tools.repl.Main'
+  classpath = sourceSets.main.runtimeClasspath + configurations.replCompiler
+  standardInput = System.in
+  args '-usejavacp'
 }
 
-compileScala {
-    scalaCompileOptions.additionalParameters = [
-        "-feature"
-      , "-deprecation"
-      , "-unchecked"
-      , "-Xlint"
-      , "-Xfatal-warnings"
-      , "-Xasync"
-      , "-Xsource:3"
-      , "-opt:inline:cdb.**"
-      , "-release"
-      , "20"
-    ]
+jar {
+  manifest {
+    attributes(
+      'App-Version': version,
+      'Implementation-Version': version
+    )
+  }
 }
 
 shadowJar {
-    archiveClassifier = ''
-    manifest {
-        attributes 'App-Version': gitVersion()
-    }
+  archiveClassifier = 'all'
+  manifest {
+    attributes(
+      'App-Version': version,
+      'Implementation-Version': version
+    )
+  }
+  mergeServiceFiles()
 }
 
-nativeImage {
-    dependsOn shadowJar
+publishing {
+  publications {
+    mavenJava(MavenPublication) {
+      from components.java
+    }
+  }
+}
 
-    minHeap 1
-    maxHeap 3
-    maxNew 3
+tasks.withType(JavaCompile).configureEach {
+  options.release = 17
+}
 
-    parameters = [
-      NativeImage.Option.STATIC
-    , NativeImage.Option.MUSL
-    , NativeImage.Option.LINK_BUILD
-    ]
+def scalaCompilerParams = [
+    '-feature'
+  , '-no-indent'
+  , '-explain'
+  , '-language:noAutoTupling'
+  , '-Werror'
+  , '-Wnonunit-statement'
+  , '-Wsafe-init'
+  , '-Wunused:all'
+  , '-Wvalue-discard'
+  , '-release:17'
+]
+
+tasks.withType(org.gradle.api.tasks.scala.ScalaCompile).configureEach {
+  scalaCompileOptions.deprecation = true
+  scalaCompileOptions.additionalParameters = scalaCompilerParams
+}
+
+tasks.named('compileTestScala').configure {
+  scalaCompileOptions.additionalParameters = scalaCompilerParams.findAll {
+    it != '-Wnonunit-statement' && it != '-Wvalue-discard'
+  }
 }
