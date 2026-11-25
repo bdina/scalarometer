@@ -1,8 +1,11 @@
-package com.statistics
+package com.scalarometer.statistics
+
+import java.lang.management.ManagementFactory
+import java.util.logging.Logger
+import scala.util.control.NonFatal
 
 trait StatisticsLogging {
-  import java.util.logging.Logger
-  val logger: Logger = Logger.getLogger(this.getClass.getName)
+  @transient lazy val logger: Logger = Logger.getLogger(this.getClass.getName)
 }
 
 trait CountableMetric {
@@ -12,7 +15,7 @@ trait CountableMetric {
 
 trait Metric {
   def name: String
-  def data(reset: Boolean): Map[String, Number]
+  def data(reset: Boolean = false): Map[String, Number]
 }
 
 trait SnapshotableMetric {
@@ -24,25 +27,41 @@ trait StatisticsBean {
 }
 
 trait Statistics extends StatisticsLogging {
-  import java.lang.management.ManagementFactory
+  protected def readerBean(): ReaderBean = ReaderBean()
+
   def initializeJmx(): Unit = {
     if (System.getProperty("com.sun.management.jmxremote") == null) {
       logger.severe("JMX remote is disabled")
     } else {
       val mbs = ManagementFactory.getPlatformMBeanServer()
       try {
-        val readerBean = ReaderBean()
-        mbs.registerMBean(readerBean, ReaderBean.objectName)
+        val bean = readerBean()
+        val _ = mbs.registerMBean(bean, bean.objectName)
         logger.info("JMX MBean successfully registered")
       } catch {
-        case e: Exception => logger.severe(s"Failed to register JMX Agent: ${e.getMessage}")
+        case NonFatal(e) =>
+          logger.severe(s"Failed to register JMX Agent: ${e.getMessage}")
       }
-      val portString = System.getProperty("com.sun.management.jmxremote.port")
-      if (portString != null) {
-        logger.info(s"JMX running on port: $portString")
-      } else {
-        logger.finest("JMX port undefined")
+      Option(System.getProperty("com.sun.management.jmxremote.port")) match {
+        case Some(portString) =>
+          logger.info(s"JMX running on port: $portString")
+        case None =>
+          logger.finest("JMX port undefined")
       }
+    }
+  }
+
+  def unregisterJmx(): Unit = {
+    try {
+      val mbs = ManagementFactory.getPlatformMBeanServer()
+      val objectName = readerBean().objectName
+      if (mbs.isRegistered(objectName)) {
+        mbs.unregisterMBean(objectName)
+        logger.info("JMX MBean successfully unregistered")
+      }
+    } catch {
+      case NonFatal(e) =>
+        logger.warning(s"Failed to unregister JMX Agent: ${e.getMessage}")
     }
   }
 }

@@ -1,11 +1,15 @@
-package com.statistics
+package com.scalarometer.statistics
 
-class ReaderBean(registry: Registry = Registry.global) extends StatisticsBean {
-  def getStatistics(reset: Boolean): Map[String,Number] = registry.stats(reset)
-  def objectName = ReaderBean.objectName
+import javax.management.ObjectName
+
+trait ReaderBeanMBean extends StatisticsBean
+
+class ReaderBean(registry: Registry = Registry.global) extends ReaderBeanMBean {
+  override def getStatistics(reset: Boolean): Map[String, Number] = registry.stats(reset)
+  def objectName: ObjectName = ReaderBean.objectName
 }
+
 object ReaderBean {
-  import javax.management.ObjectName
-  val objectName = new ObjectName("com.statistics:type=ReaderBean")
-  def apply() = new ReaderBean()
+  val objectName: ObjectName = new ObjectName("com.scalarometer.statistics:type=ReaderBean")
+  def apply(registry: Registry = Registry.global): ReaderBean = new ReaderBean(registry)
 }
