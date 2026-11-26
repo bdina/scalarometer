@@ -16,7 +16,7 @@ It is specifically structured to be embedded in JVM and GraalVM Native Image app
 | **Runtime Dependencies** | `scala3-library_3` only | Zero third-party runtime deps; `scala3-compiler_3` isolated in `replCompiler` (`2ad7517`) |
 | **Build System** | Gradle `9.9.2`, Shadow `9.6.1`, `java-library`, `maven-publish` | Strict `-Werror` + lint flags on both main and test compilation (`2ad7517`) |
 | **Versioning** | `com.palantir.git-version:1.0.0` | Pure-Java JGit (`6.10.1.202505221210-r`) + Guava (`33.8.0-jre`) CVE constraints for `git`-less containers (`2ad7517`) |
-| **Testing** | ScalaTest `3.2.20`, JUnit `4.13.2`, ScalaTestPlus `3.2.20.0` | 46 automated tests covering unit behavior, concurrency, serialization, JMX, cross-package `inline` expansion, and deterministic `ThreadMXBean` allocation regression (`c1ac060`, `e6d3ce6`, `9e988d9`) |
+| **Testing** | ScalaTest `3.2.20`, JUnit `4.13.2`, ScalaTestPlus `3.2.20.0` | 56 automated tests covering unit behavior, concurrency, serialization, JMX, exporters, periodic reporting, cross-package `inline` expansion, deterministic `ThreadMXBean` allocation regression, plus GraalVM `native-image --no-fallback` smoke verification (`c1ac060`, `e6d3ce6`, `9e988d9`, `ab56a6d`) |
 | **Logging** | `java.util.logging.Logger` via `ClassValue[Logger]` | Zero per-instance logger fields + Scala 3 `inline` log level guards (`dd81ec4`, `9d0693d`) |
 
 ## Core Components
@@ -84,9 +84,26 @@ classDiagram
       +stats(reset: Boolean = false): Map[String, Number]
       +registerMetric(m: Metric): Set[Metric]
       +registerFixedMetric(m: Metric): Set[Metric]
-      +addAll(items): this.type
-      +removeAll(items): this.type
+      +scoped(metrics: Metric*): MetricScope
+      +withScope(metrics: Metric*)(inline block): A
       +iterator: Iterator[Metric]
+    }
+    class MetricScope {
+      +isClosed: Boolean
+      +metrics: IArray[Metric]
+      +close(): Unit
+    }
+    class MetricsFormat {
+      <<trait>>
+      +contentType: String
+      +writeTo(registry, out, reset): Unit
+      +writeMetrics(metrics, out, reset): Unit
+      +format(registry, reset): String
+    }
+    class PeriodicReporter {
+      +reportOnce(): Option[String]
+      +isClosed: Boolean
+      +close(): Unit
     }
     class ReaderBean {
       +getStatistics(reset: Boolean): Map[String, Number]
@@ -102,6 +119,10 @@ classDiagram
     Metric <|.. Gauge
     StatisticsLogging <|.. Gauge
     Registry o-- Metric
+    Registry ..> MetricScope
+    MetricsFormat ..> Registry
+    PeriodicReporter --> Registry
+    PeriodicReporter --> MetricsFormat
     ReaderBean --> Registry
 ```
 
@@ -112,7 +133,9 @@ classDiagram
 - **[`AggregateCounter`](../src/main/scala/com/scalarometer/statistics/AggregateCounter.scala)** (`4e33225`): Tracks `min`, `max`, `samples`, and `average` across calls to `increment`. Uses explicit sample-count tracking (`_samples == 0L`) so zero and negative samples compute accurate bounds without sentinel corruption. `data()`, `appendData()`, and `toString()` capture primitive values into stack locals under `synchronized` (avoiding `Tuple4`/boxing) and perform boxing, `Map.Map3` allocation, and string formatting outside the monitor lock.
 - **[`Histogram`](../src/main/scala/com/scalarometer/statistics/Histogram.scala)** (`8509b5e`): Replaces boxed `Vector[Long]` storage with a lazily grown primitive `Array[Long]` buffer (growing `0 -> 16 -> ... -> max_snapshots` with overflow-safe doubling and reused across `reset()` for zero steady-state allocations). Stores deduplicated percentile keys in a flat `Array[String]` indexed by `Percentile.ordinal` and caches `allPercentiles: IArray[Percentile]`. Computes `mean`, `variance`, and `standard_deviation` via unboxed primitive `while` loops, sorts copies in-place with `java.util.Arrays.sort`, exposes unboxed `percentileValue(p): Double` and Scala 3 `snapshotValues: IArray[Long]`, and populates `data()`/`appendData()` in a single builder pass.
 - **[`Gauge`](../src/main/scala/com/scalarometer/statistics/Gauge.scala)** (`aa03462`, `9e988d9`): Abstract base class with specialized `final` subclasses (`MultiGauge`, `SingleGauge`, `LongGauge`, `DoubleGauge`, `IntGauge`) avoiding unused fields, wrapper closures, and intermediate maps during `Registry.stats()`. `Gauge.long`, `Gauge.double`, and `Gauge.int` expand inline onto `@FunctionalInterface` `Serializable` primitive SAM traits (`LongSampler`, `DoubleSampler`, `IntSampler`) so Scala 3 avoids unspecialized `Function0` boxing while preserving full Java Serialization support.
-- **[`Registry`](../src/main/scala/com/scalarometer/statistics/StatisticsRegistry.scala)** (`b16914b`): Extends `Statistics` and `scala.collection.Iterable[Metric]`. Stores resettable and fixed metrics in atomic `MetricBucket(metrics: Set[Metric], byName: Map[String, Metric])` snapshots updated via allocation-free `@tailrec` CAS loops that skip locked CAS on no-op register/unregister calls. Provides O(1) `metric`/`fixedMetric`/`get`/`contains` lookups, O(1) `isEmpty`, zero-`Set`-allocation `size`/`iterator`/`foreach`, bulk `++=`/`--=` operators (materializing single-use `Iterator`s once for safe CAS retries), and single-pass `stats(reset)` using `Map.newBuilder` + `Metric.appendData` with an empty-registry singleton fast path.
+- **[`Registry`](../src/main/scala/com/scalarometer/statistics/StatisticsRegistry.scala) & `MetricScope`** (`b16914b`, `94c6f0c`): Extends `Statistics` and `scala.collection.Iterable[Metric]`. Stores resettable and fixed metrics in atomic `MetricBucket(metrics: Set[Metric], byName: Map[String, Metric])` snapshots updated via allocation-free `@tailrec` CAS loops that skip locked CAS on no-op register/unregister calls. Provides O(1) `metric`/`fixedMetric`/`get`/`contains` lookups, O(1) `isEmpty`, zero-`Set`-allocation `size`/`iterator`/`foreach`, bulk `++=`/`--=` operators, single-pass `stats(reset)` using `Map.newBuilder` + `Metric.appendData`, and `AutoCloseable` `MetricScope` (`scoped`, `scopedAll`, `inline withScope`) backed by `IArray[Metric]` and idempotent `AtomicBoolean` close for leak-free temporary metric lifecycles.
+- **[`MetricsFormat`](../src/main/scala/com/scalarometer/statistics/MetricsFormat.scala)** (`ab5eaf8`, `ab56a6d`): Zero-dependency, zero-regex streaming exporters (`MetricsFormat.Logfmt` and `MetricsFormat.Json`) writing sorted entries directly into any `java.lang.Appendable` (with `StringBuilder` primitive fast-paths and shared `EmptyEntries` zero-allocation empty handling). Preserves `Registry`'s resettable-vs-fixed bucket contract without allocating intermediate `HashMap`s, supports unregistered session metric collections (`formatMetrics`/`writeMetrics`), sanitizes logfmt keys, performs RFC 8259 JSON escaping, and converts non-finite floats safely (`NaN`/`±Inf` in logfmt, `null` in JSON).
+- **[`PeriodicReporter`](../src/main/scala/com/scalarometer/statistics/PeriodicReporter.scala)** (`ab54214`): Native-Image-safe `AutoCloseable` periodic flush helper built on a named daemon `ScheduledExecutorService` (or caller-provided executor). Reuses a synchronized `StringBuilder`, skips empty outputs when `skipWhenEmpty = true`, isolates `NonFatal` sink exceptions so schedules never silently cancel, supports `reportOnce()` for deterministic testing and optional `flushOnClose`, and exposes `PeriodicReporter.logging(...)` and `PeriodicReporter.start(...)` overloads for both `java.time.Duration` and Scala `FiniteDuration`.
 - **[`StopWatch`](../src/main/scala/com/scalarometer/statistics/StopWatch.scala)** (`3e0d68c`, `9e988d9`): Uses a Scala 3 `enum State derives CanEqual` inside a static `TimingState` (no hidden `$outer` pointer) with a shared `InitialState` constant for zero-allocation construction and `reset()`, allocation-free `@tailrec` CAS transitions, and a `java.util.function.LongSupplier` clock with direct `System.nanoTime()` fast-path. Exposes zero-allocation `opaque type Marker = Long` (with `.timestamp`, `.elapsed`, `.elapsedNanos` extension methods and `@targetName("elapsedFromMarker")` overload disambiguation), compile-time constant `inline val NanosPerMilli`, and zero-overhead `inline def timed` / `timedNanos`.
 
 ## Memory Footprint & Throughput Architecture
@@ -125,7 +148,8 @@ classDiagram
 | **`Histogram`** | Reusable primitive `Array[Long]` + unboxed loops + `Arrays.sort` + `IArray` | ~8 KB in 1 `long[]` at 1,024 samples (vs ~30 KB / 1,057 objects); **0 B/op** steady-state `incrementByAndRecordSnapshot` across resets | `8509b5e` |
 | **`StopWatch`** | `opaque type Marker = Long` + `inline timed`/`timedNanos` + `LongSupplier` + `@tailrec` CAS | **0 B/op** on `mark()`, `elapsed(marker)`, `reset()`, and custom `LongSupplier` clocks | `3e0d68c`, `9e988d9` |
 | **`Gauge`** | Specialized `SingleGauge` / primitive SAM `LongGauge`/`DoubleGauge`/`IntGauge` | 0 wrapper closures; 0 intermediate `Map`s in `Registry.stats()` | `aa03462`, `9e988d9` |
-| **`Registry`** | `MetricBucket` O(1) index + single-pass `Map.newBuilder` + `appendData` + fast `Iterable` | **0 B/op** on `isEmpty`, `size`, `contains`, empty `stats()`, and no-op `unregisterMetric` | `b16914b` |
+| **`Registry` & `MetricScope`** | `MetricBucket` O(1) index + single-pass `Map.newBuilder` + `appendData` + `IArray` `MetricScope` | **0 B/op** on `isEmpty`, `size`, `contains`, empty `stats()`, no-op `unregisterMetric`, and idempotent `MetricScope.close()` | `b16914b`, `94c6f0c` |
+| **`MetricsFormat` & `PeriodicReporter`** | Zero-regex `Appendable` streaming + `Array.newBuilder` + `EmptyEntries` + reused `StringBuilder` | **0 B/op** on empty `Logfmt`/`Json` `writeTo`; zero intermediate `HashMap` allocations | `ab5eaf8`, `ab54214`, `ab56a6d` |
 | **Bytecode Optimizer** | Scala 3.9 `-opt`, `-opt-inline:com.scalarometer.statistics.**`, `-language:strictEquality` | Method-local + package-internal bytecode optimization with deterministic `ThreadMXBean` verification | `e6d3ce6` |
 
 ## Concurrency & Serialization Guarantees
@@ -137,7 +161,8 @@ classDiagram
 ## JMX & GraalVM Native Image Compatibility
 
 - **Standard MBean Compliance**: [`ReaderBean`](../src/main/scala/com/scalarometer/statistics/StatsReader.scala) extends `ReaderBeanMBean` (which extends `StatisticsBean`), satisfying JMX Standard MBean naming conventions under `com.scalarometer.statistics:type=ReaderBean`. `Registry.readerBean()` binds `ReaderBean(this)` so non-global registries register themselves rather than `Registry.global` (`dd81ec4`).
-- **Native Image Safety**: `Statistics.initializeJmx()` is strictly opt-in (no-op unless `-Dcom.sun.management.jmxremote` is set) and catches `NonFatal` exceptions (such as `UnsupportedOperationException` when JMX monitoring is disabled in a native binary), logging errors without throwing. Static final `VarHandle` (`Counter`) and `ClassValue` (`StatisticsLogging`) are natively supported and lowered by GraalVM Native Image without runtime reflection configuration.
+- **Native Image Safety & Verification (`ab5eaf8`, `ab54214`, `ab56a6d`)**: `Statistics.initializeJmx()` is strictly opt-in (no-op unless `-Dcom.sun.management.jmxremote` is set) and catches `NonFatal` exceptions (such as `UnsupportedOperationException` when JMX monitoring is disabled in a native binary), logging errors without throwing. Static final `VarHandle` (`Counter`), `ClassValue` (`StatisticsLogging`), zero-regex `MetricsFormat`, and `PeriodicReporter` compile cleanly with GraalVM `native-image --no-fallback` and zero reflection configuration (verified end-to-end via [`scripts/verify-native-image`](../scripts/verify-native-image)).
+- **Ephemeral Session Cardinality Pattern**: For high-churn ephemeral sessions (such as per-channel stream lifecycles in `tablo2hdhomerun`), prefer unregistered session-local metrics formatted directly on teardown via `MetricsFormat.Logfmt.formatMetrics(...)`, `Gauge` over live session maps for active counts, or `Registry.scoped`/`withScope` (`AutoCloseable`) when temporary metrics must be visible in a shared `Registry`.
 - **Optional `compiler.native-image` Plugin**: [`buildSrc/src/main/groovy/compiler/NativeImage.groovy`](../buildSrc/src/main/groovy/compiler/NativeImage.groovy) provides a Gradle 9 Provider-API `NativeImageTask` modeled after `press` and `tablo2hdhomerun` for downstream or smoke-test native builds.
 
 ## Build, Packaging & CI Automation (`2ad7517`, `e6d3ce6`, `1b2bafc`, `0453e10`–`2481dd4`, `e551c8f`–`053b6ed`)

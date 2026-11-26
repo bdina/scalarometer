@@ -7,7 +7,8 @@ A lightweight, high-throughput, thread-safe **Scala 3 LTS** metrics and telemetr
 - **Counters & Aggregates**: Lock-free [`Counter`](src/main/scala/com/scalarometer/statistics/Counter.scala) backed by an inlined `@volatile` `Long` and `@static` `VarHandle` (`@PolymorphicSignature`, zero wrapper object, overflow-safe `compareAndExchange` bounded decrements), plus [`AggregateCounter`](src/main/scala/com/scalarometer/statistics/AggregateCounter.scala) tracking min, max, sample count, and average with minimal lock hold times.
 - **Gauges**: Functional [`Gauge`](src/main/scala/com/scalarometer/statistics/Gauge.scala) metrics supporting multi-key samplers, `Gauge.single`, and zero-boxing primitive SAM factories (`Gauge.long`, `Gauge.double`, `Gauge.int`).
 - **Histograms**: Bounded-memory [`Histogram`](src/main/scala/com/scalarometer/statistics/Histogram.scala) backed by a lazily grown, reusable primitive `Array[Long]` buffer computing unboxed mean, variance, standard deviation, Scala 3 `IArray[Long]` snapshots (`snapshotValues`), and linearly interpolated percentiles (`P_000` through `P_100`, unboxed `percentileValue` and `Number` `percentile`).
-- **Scala Collections-Friendly Registry**: Thread-safe [`Registry`](src/main/scala/com/scalarometer/statistics/StatisticsRegistry.scala) implementing `Iterable[Metric]` with separate resettable and fixed metric buckets (`+=`, `-=`, `++=`, `--=`, O(1) `get`/`contains`/`isEmpty`, allocation-free `iterator`/`foreach`, and single-pass `stats(reset)` via `Metric.appendData`).
+- **Scala Collections-Friendly Registry & Scoped Lifecycle**: Thread-safe [`Registry`](src/main/scala/com/scalarometer/statistics/StatisticsRegistry.scala) implementing `Iterable[Metric]` with separate resettable and fixed metric buckets (`+=`, `-=`, `++=`, `--=`, O(1) `get`/`contains`/`isEmpty`, allocation-free `iterator`/`foreach`, single-pass `stats(reset)` via `Metric.appendData`), plus `AutoCloseable` [`MetricScope`](src/main/scala/com/scalarometer/statistics/StatisticsRegistry.scala) (`scoped`, `scopedAll`, `inline withScope`) for deterministic cleanup of temporary metrics.
+- **Native-Image Exporters & Periodic Reporting**: Zero-dependency, zero-regex [`MetricsFormat`](src/main/scala/com/scalarometer/statistics/MetricsFormat.scala) streaming formatters (`MetricsFormat.Logfmt` and `MetricsFormat.Json`) writing directly to `Appendable` for registries or unregistered session metrics, plus Native-Image-safe [`PeriodicReporter`](src/main/scala/com/scalarometer/statistics/PeriodicReporter.scala) (`AutoCloseable`, daemon scheduler, reusable buffer, `NonFatal` isolation).
 - **StopWatch**: Deterministic, thread-safe [`StopWatch`](src/main/scala/com/scalarometer/statistics/StopWatch.scala) featuring zero-allocation Scala 3 `opaque type Marker` with extension methods (`.timestamp`, `.elapsed`, `.elapsedNanos`), injectable `LongSupplier` clock, and zero-overhead `inline` `StopWatch.timed` / `StopWatch.timedNanos`.
 - **Optional JMX Exposure**: Standard MBean [`ReaderBean`](src/main/scala/com/scalarometer/statistics/StatsReader.scala) (`com.scalarometer.statistics:type=ReaderBean`) gated behind `com.sun.management.jmxremote` and safe in GraalVM Native Image environments.
 - **Zero External Runtime Dependencies**: Uses only `scala3-library_3` and `java.util.logging` (cached via `ClassValue[Logger]` with Scala 3 `inline` level guards).
@@ -53,6 +54,49 @@ val snapshot: Map[String, Number] = registry.stats(reset = true)
 
 // Standard Scala collections integration via Iterable[Metric]
 val metricNames: Set[String] = registry.map(_.name).toSet
+```
+
+### Native-Image Observability: Exporters, Periodic Reporting & Ephemeral Sessions
+
+For `FROM scratch` GraalVM Native Image services (where JMX is unavailable), combine `MetricsFormat`, `PeriodicReporter`, and session-local or scoped metrics:
+
+```scala
+import com.scalarometer.statistics._
+import java.time.Duration
+
+// 1. Periodic structured service logging (daemon thread, reusable StringBuilder, AutoCloseable)
+val reporter = PeriodicReporter.logging(
+  registry = registry,
+  interval = Duration.ofSeconds(60),
+  format = MetricsFormat.Logfmt,
+  reset = true,
+  prefix = "[service:metrics] "
+)
+
+// 2. Zero-dependency JSON snapshot for a lightweight HTTP status/metrics route
+val jsonPayload: String = MetricsFormat.Json.format(registry, reset = false)
+// Content-Type: MetricsFormat.Json.contentType ("application/json; charset=utf-8")
+
+// 3. Leak-proof ephemeral session metrics (e.g. per-stream channel surfing):
+//    Keep per-session metrics unregistered and format directly on teardown:
+val streamBytes = Counter("stream.bytes")
+val streamChunkMs = Histogram("stream.chunk.ms", max_snapshots = 256)
+streamBytes += 65536L
+streamChunkMs.incrementByAndRecordSnapshot(14L)
+val streamSummary: String = MetricsFormat.Logfmt.formatMetrics(List(streamBytes, streamChunkMs))
+
+// 4. Or use AutoCloseable scoped registration when temporary metrics must be live in Registry:
+registry.withScope(streamBytes) {
+  // Visible in registry while active; guaranteed unregistered on exit or exception
+}
+
+reporter.close()
+```
+
+Verify Native Image compatibility end-to-end (`--no-fallback`, zero `reflect-config.json`):
+
+```bash
+./scripts/verify-native-image
 ```
 
 ### Optional JMX Registration
