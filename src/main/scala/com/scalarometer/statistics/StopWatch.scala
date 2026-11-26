@@ -1,43 +1,56 @@
 package com.scalarometer.statistics
 
 import java.util.concurrent.atomic.AtomicReference
+import scala.annotation.{tailrec, targetName}
 
-class StopWatch(clock: () => Long = () => System.nanoTime()) {
+open class StopWatch(clock: () => Long = StopWatch.SystemClock) {
   import StopWatch._
 
-  private case class TimingState(state: State, t0: Long, t1: Long)
-
   private val stateRef: AtomicReference[TimingState] =
-    new AtomicReference(TimingState(State.STOPPED, 0L, 0L))
+    new AtomicReference(InitialState)
+
+  private inline def readClock(): Long =
+    if (clock eq SystemClock) System.nanoTime() else clock()
 
   def start(): Unit = {
-    val _ = stateRef.updateAndGet { current =>
+    @tailrec
+    def loop(): Unit = {
+      val current = stateRef.get()
       current.state match {
-        case State.STOPPED => TimingState(State.RUNNING, clock(), 0L)
-        case State.RUNNING => current
+        case State.STOPPED =>
+          val next = new TimingState(State.RUNNING, readClock(), 0L)
+          if (!stateRef.compareAndSet(current, next)) loop()
+        case State.RUNNING => ()
       }
     }
+    loop()
   }
 
   def mark(): Marker = {
     val current = stateRef.get()
     current.state match {
       case State.STOPPED => Marker.fromNanoTime(current.t1)
-      case State.RUNNING => Marker.fromNanoTime(clock())
+      case State.RUNNING => Marker.fromNanoTime(readClock())
     }
   }
 
   def stop(): Long = {
-    val updated = stateRef.updateAndGet { current =>
+    @tailrec
+    def loop(): TimingState = {
+      val current = stateRef.get()
       current.state match {
-        case State.RUNNING => TimingState(State.STOPPED, current.t0, clock())
+        case State.RUNNING =>
+          val next = new TimingState(State.STOPPED, current.t0, readClock())
+          if (stateRef.compareAndSet(current, next)) next
+          else loop()
         case State.STOPPED => current
       }
     }
+    val updated = loop()
     (updated.t1 - updated.t0) / NanosPerMilli
   }
 
-  def reset(): Unit = stateRef.set(TimingState(State.STOPPED, 0L, 0L))
+  def reset(): Unit = stateRef.set(InitialState)
 
   def state: State = stateRef.get().state
   def isRunning: Boolean = state == State.RUNNING
@@ -46,7 +59,7 @@ class StopWatch(clock: () => Long = () => System.nanoTime()) {
     val current = stateRef.get()
     current.state match {
       case State.STOPPED => current.t1 - current.t0
-      case State.RUNNING => clock() - current.t0
+      case State.RUNNING => readClock() - current.t0
     }
   }
 
@@ -56,36 +69,59 @@ class StopWatch(clock: () => Long = () => System.nanoTime()) {
     val current = stateRef.get()
     val elapsedMs = (current.state match {
       case State.STOPPED => current.t1 - current.t0
-      case State.RUNNING => clock() - current.t0
+      case State.RUNNING => readClock() - current.t0
     }) / NanosPerMilli
     s"StopWatch [ state: ${current.state} , t0: ${current.t0} , t1: ${current.t1} , elapsed: $elapsedMs ]"
   }
 }
 
 object StopWatch {
-  private val NanosPerMilli: Long = 1_000_000L
+  inline val NanosPerMilli = 1_000_000L
 
-  enum State {
+  private val SystemClock: () => Long = () => System.nanoTime()
+
+  private final class TimingState(val state: State, val t0: Long, val t1: Long)
+  private val InitialState: TimingState = new TimingState(State.STOPPED, 0L, 0L)
+
+  enum State derives CanEqual {
     case STOPPED, RUNNING
   }
 
-  final case class Marker(timestamp: Long)
+  opaque type Marker = Long
+
   object Marker {
-    def now: Marker = Marker(System.nanoTime())
-    def fromNanoTime(nanotime: Long): Marker = Marker(nanotime)
+    given CanEqual[Marker, Marker] = CanEqual.derived
+
+    inline def apply(timestamp: Long): Marker = timestamp
+    inline def now: Marker = System.nanoTime()
+    inline def fromNanoTime(nanotime: Long): Marker = nanotime
+
+    extension (marker: Marker) {
+      inline def timestamp: Long = marker
+      inline def elapsedNanos: Long = System.nanoTime() - marker
+      inline def elapsed: Long = (System.nanoTime() - marker) / NanosPerMilli
+    }
   }
 
   def now: Long = System.nanoTime()
 
   def elapsed(t0: Long): Long = (System.nanoTime() - t0) / NanosPerMilli
-  def elapsed(t0: Marker): Long = elapsed(t0.timestamp)
 
-  def timed[A](block: => A): (A, Long) = {
-    val sw = StopWatch()
-    sw.start()
+  @targetName("elapsedFromMarker")
+  inline def elapsed(t0: Marker): Long = (System.nanoTime() - Marker.timestamp(t0)) / NanosPerMilli
+
+  inline def timed[A](inline block: A): (A, Long) = {
+    val t0 = System.nanoTime()
     val result = block
-    val ms = sw.stop()
+    val ms = (System.nanoTime() - t0) / NanosPerMilli
     (result, ms)
+  }
+
+  inline def timedNanos[A](inline block: A): (A, Long) = {
+    val t0 = System.nanoTime()
+    val result = block
+    val nanos = System.nanoTime() - t0
+    (result, nanos)
   }
 
   def apply(): StopWatch = new StopWatch()
