@@ -6,7 +6,10 @@ GIT_PROJECT="${PWD##*/}"
 IMAGE="${IMAGE:-graalvm-dev}"
 TAG="${TAG:-latest}"
 
-mkdir -p "${PWD}/.gradle-docker" "${PWD}/.gradle-project-docker"
+mkdir -p "${PWD}/.gradle-docker/daemon" \
+  "${PWD}/.gradle-docker/.tmp" \
+  "${PWD}/.gradle-docker/notifications" \
+  "${PWD}/.gradle-project-docker"
 
 resolve_global_gitignore() {
   local excludes=""
@@ -37,11 +40,15 @@ run_docker() {
   docker run --name "${GIT_PROJECT}-build-$(date +%s)-$$" \
     -e JAVA_TOOL_OPTIONS="--sun-misc-unsafe-memory-access=allow --enable-native-access=ALL-UNNAMED" \
     -e GRADLE_USER_HOME="/git/${GIT_PROJECT}/.gradle-docker" \
-    -e GRADLE_OPTS="-Dorg.gradle.projectcachedir=/git/${GIT_PROJECT}/.gradle-project-docker" \
+    -e GRADLE_OPTS="-Dorg.gradle.projectcachedir=/git/${GIT_PROJECT}/.gradle-project-docker -Dorg.gradle.welcome=never -XX:TieredStopAtLevel=1 -XX:+UseParallelGC" \
     ${gitignore_args[@]+"${gitignore_args[@]}"} \
     ${it_flags} \
     --rm \
     -v "${PWD}:/git/${GIT_PROJECT}/" \
+    --tmpfs "/tmp:rw,exec,nosuid,size=512m" \
+    --tmpfs "/git/${GIT_PROJECT}/.gradle-docker/daemon:rw,nosuid,size=128m" \
+    --tmpfs "/git/${GIT_PROJECT}/.gradle-docker/.tmp:rw,nosuid,size=128m" \
+    --tmpfs "/git/${GIT_PROJECT}/.gradle-docker/notifications:rw,nosuid,size=16m" \
     -w "/git/${GIT_PROJECT}" \
     --memory="${MEMORY}" \
     "${IMAGE}:${TAG}" \
