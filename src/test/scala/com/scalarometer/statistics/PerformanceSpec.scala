@@ -140,6 +140,17 @@ class PerformanceSpec extends AnyFlatSpec with Matchers {
     val timedBytesPerOp = timedBytes / iterations
     logger.info(s"StopWatch.timedNanos ($iterations ops): $timedBytesPerOp bytes/op")
     timedBytesPerOp should be <= 64L
+
+    var customTick = 1_000_000L
+    val customSw = StopWatch(() => customTick)
+    customSw.start()
+    val (customClockBytes, _) = measureMinBytes(warmup = 20_000, iterations = iterations) {
+      customTick += 1_000L
+      val m = customSw.mark()
+      customSw.elapsedNanos ^ m.timestamp
+    }
+    logger.info(s"StopWatch custom LongSupplier clock ($iterations ops): $customClockBytes bytes allocated")
+    customClockBytes shouldBe 0L
   }
 
   "Registry" should "perform O(1) queries, empty stats, and no-op unregisters with zero allocations" in {

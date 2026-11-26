@@ -1,16 +1,17 @@
 package com.scalarometer.statistics
 
 import java.util.concurrent.atomic.AtomicReference
+import java.util.function.LongSupplier
 import scala.annotation.{tailrec, targetName}
 
-open class StopWatch(clock: () => Long = StopWatch.SystemClock) {
+open class StopWatch(clock: LongSupplier = StopWatch.SystemClock) {
   import StopWatch._
 
   private val stateRef: AtomicReference[TimingState] =
     new AtomicReference(InitialState)
 
   private inline def readClock(): Long =
-    if (clock eq SystemClock) System.nanoTime() else clock()
+    if (clock eq SystemClock) System.nanoTime() else clock.getAsLong()
 
   def start(): Unit = {
     @tailrec
@@ -78,7 +79,7 @@ open class StopWatch(clock: () => Long = StopWatch.SystemClock) {
 object StopWatch {
   inline val NanosPerMilli = 1_000_000L
 
-  private val SystemClock: () => Long = () => System.nanoTime()
+  private val SystemClock: LongSupplier = () => System.nanoTime()
 
   private final class TimingState(val state: State, val t0: Long, val t1: Long)
   private val InitialState: TimingState = new TimingState(State.STOPPED, 0L, 0L)
@@ -125,5 +126,5 @@ object StopWatch {
   }
 
   def apply(): StopWatch = new StopWatch()
-  def apply(clock: () => Long): StopWatch = new StopWatch(clock)
+  def apply(clock: LongSupplier): StopWatch = new StopWatch(clock)
 }
