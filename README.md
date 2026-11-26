@@ -102,16 +102,45 @@ All development and validation runs inside the `graalvm-dev:latest` Docker conta
 ./scripts/docker-build gradle --no-daemon shadowJar
 ```
 
-### Publish to Local Maven Repository
+### Publish to Local Maven Repository (`~/.m2`)
+
+Publishes `com.scalarometer:scalarometer_3:<version>` (standard Maven SemVer derived from `gitVersion()` with leading `v` stripped, e.g. `0.0.2`), thin library JAR (`.class` + `.tasty`), `-sources.jar`, `.pom`, and Gradle `.module` metadata directly into host `~/.m2/repository` with preserved host user ownership:
 
 ```bash
-./scripts/docker-build gradle --no-daemon publishToMavenLocal
+# Run tests and publish clean version to host ~/.m2/repository
+./docker-publish-local.sh
+
+# Publish a local SNAPSHOT or custom version (still requires clean git tree unless --allow-dirty)
+./docker-publish-local.sh --version 0.0.3-SNAPSHOT
+
+# Publish without re-running tests, or verify end-to-end in an isolated temp ~/.m2
+./docker-publish-local.sh --skip-tests
+./scripts/verify-maven-local
 ```
+
+> Dirty working trees are blocked from publishing by default; pass `--allow-dirty` (or `-PallowDirtyPublish=true`) to override explicitly, or set `M2_DIR=/custom/path` to target an alternate Maven directory.
 
 Consuming from a downstream Gradle project (`mavenLocal()`):
 
 ```groovy
-implementation "com.scalarometer:scalarometer:<version>"
+repositories {
+  mavenLocal {
+    content {
+      includeGroup 'com.scalarometer'
+    }
+  }
+  mavenCentral()
+}
+
+dependencies {
+  implementation "com.scalarometer:scalarometer_3:<version>"
+}
+```
+
+When building a downstream project inside Docker (e.g., `graalvm-dev:latest`), mount the host repository read-only so `mavenLocal()` resolves published artifacts:
+
+```bash
+docker run ... -v "${HOME}/.m2:/root/.m2:ro" ...
 ```
 
 ### Interactive Container Shell / Scala 3 REPL
