@@ -77,14 +77,19 @@ Downstream Scala 3 consumers should recompile against the updated JAR/TASTy:
 
 ## Building & Testing
 
-All development and validation runs inside the `graalvm-dev:latest` Docker container via [`scripts/docker-build`](scripts/docker-build) (isolated `.gradle-docker/` and `.gradle-project-docker/` caches):
+All development and validation runs inside the `graalvm-dev:latest` Docker container via [`scripts/docker-build`](scripts/docker-build) (persisted `.gradle-docker/caches/` + `.gradle-project-docker/`, with ephemeral daemon logs, `.tmp`, notifications, and `/tmp` mounted on RAM `tmpfs` to minimize host disk writes):
 
 ### Run Tests
 
 ```bash
+# Incremental compile & test (fast default, minimal disk writes)
 ./docker-build-test.sh
-# or directly:
-./scripts/docker-build gradle --no-daemon clean test --warning-mode all
+
+# Full clean compile & test
+./docker-build-test.sh --clean
+
+# Optional HTML & JUnit XML test reports (disabled by default to minimize disk writes)
+./docker-build-test.sh -PtestReports=true
 ```
 
 ### Build Library & Shadow JARs
@@ -93,7 +98,7 @@ All development and validation runs inside the `graalvm-dev:latest` Docker conta
 # Thin library JAR (retains .tasty files for downstream Scala 3 projects) + sources JAR
 ./scripts/docker-build gradle --no-daemon jar sourcesJar
 
-# Standalone fat JAR (classifier: all; excludes scala3-compiler)
+# Standalone fat JAR (classifier: all; excludes scala3-compiler and signing/maven metadata)
 ./scripts/docker-build gradle --no-daemon shadowJar
 ```
 
