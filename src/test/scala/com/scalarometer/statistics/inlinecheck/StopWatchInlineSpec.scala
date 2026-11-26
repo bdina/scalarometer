@@ -1,6 +1,6 @@
 package com.scalarometer.statistics.inlinecheck
 
-import com.scalarometer.statistics.{Gauge, StopWatch}
+import com.scalarometer.statistics.{Counter, Gauge, MetricsFormat, Registry, StopWatch}
 import com.scalarometer.statistics.StopWatch.Marker
 import org.junit.runner.RunWith
 import org.scalatest.flatspec.AnyFlatSpec
@@ -10,7 +10,7 @@ import org.scalatestplus.junit.JUnitRunner
 @RunWith(classOf[JUnitRunner])
 class StopWatchInlineSpec extends AnyFlatSpec with Matchers {
 
-  "StopWatch and Gauge inline APIs" should "expand cleanly across package boundaries" in {
+  "StopWatch, Gauge, and Registry inline APIs" should "expand cleanly across package boundaries" in {
     val marker = Marker.now
     marker.timestamp should be <= System.nanoTime()
     marker.elapsed should be >= 0L
@@ -35,5 +35,14 @@ class StopWatchInlineSpec extends AnyFlatSpec with Matchers {
     gLong.data()("ext.long").longValue() shouldBe 99L
     gDouble.data()("ext.double").doubleValue() shouldBe 2.5
     gInt.data()("ext.int").intValue() shouldBe 7
+
+    val registry = Registry()
+    val scopedCounter = Counter("ext.scoped")
+    val formatted = registry.withScope(scopedCounter) {
+      val _ = (scopedCounter += 3L)
+      MetricsFormat.Logfmt.format(registry)
+    }
+    formatted shouldBe "ext.scoped=3"
+    registry.isEmpty shouldBe true
   }
 }

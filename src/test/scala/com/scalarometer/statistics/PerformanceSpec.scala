@@ -194,4 +194,50 @@ class PerformanceSpec extends AnyFlatSpec with Matchers {
     snap("c.10").longValue() shouldBe 1L
     snap("fixed.total").longValue() shouldBe 10L
   }
+
+  "MetricsFormat and MetricScope" should "avoid allocations on empty formats and idempotent close, and stream cleanly into a reused StringBuilder" in {
+    val empty = Registry()
+    val sb = new java.lang.StringBuilder(256)
+    val iterations = 50_000
+
+    val (emptyFmtBytes, _) = measureMinBytes(warmup = 20_000, iterations = iterations) {
+      sb.setLength(0)
+      MetricsFormat.Logfmt.writeTo(empty, sb, reset = false)
+      val l1 = sb.length().toLong
+      sb.setLength(0)
+      MetricsFormat.Json.writeTo(empty, sb, reset = false)
+      l1 ^ sb.length().toLong
+    }
+    logger.info(s"MetricsFormat empty Logfmt+Json ($iterations ops): $emptyFmtBytes bytes allocated")
+    emptyFmtBytes shouldBe 0L
+
+    val reg = Registry()
+    val scopedCounter = Counter("scoped.perf")
+    val scope = reg.scoped(scopedCounter)
+    scope.close()
+    val (closeBytes, _) = measureMinBytes(warmup = 20_000, iterations = iterations) {
+      scope.close()
+      if (scope.isClosed) 1L else 0L
+    }
+    logger.info(s"MetricScope idempotent close ($iterations ops): $closeBytes bytes allocated")
+    closeBytes shouldBe 0L
+
+    val populated = Registry()
+    val c1 = Counter("req.count")
+    val g1 = Gauge.int("workers")(4)
+    c1.increment(10L)
+    populated += c1 += g1
+    val fmtIterations = 5_000
+    val (streamBytes, _) = measureMinBytes(warmup = 2_000, iterations = fmtIterations) {
+      sb.setLength(0)
+      MetricsFormat.Logfmt.writeTo(populated, sb, reset = false)
+      val l1 = sb.length().toLong
+      sb.setLength(0)
+      MetricsFormat.Json.writeTo(populated, sb, reset = false)
+      l1 ^ sb.length().toLong
+    }
+    val bytesPerPair = streamBytes / fmtIterations
+    logger.info(s"MetricsFormat populated Logfmt+Json pair ($fmtIterations ops): $bytesPerPair bytes/pair")
+    bytesPerPair should be <= 1024L
+  }
 }

@@ -30,6 +30,7 @@ trait MetricsFormat {
 
 object MetricsFormat {
   private val HexDigits: String = "0123456789abcdef"
+  private val EmptyEntries: Array[(String, Number)] = new Array[(String, Number)](0)
 
   private val EntryKeyComparator: Comparator[(String, Number)] =
     (a, b) => a._1.compareTo(b._1)
@@ -38,7 +39,7 @@ object MetricsFormat {
     val resettable = registry.metrics
     val fixed = registry.fixedMetrics
     if (resettable.isEmpty && fixed.isEmpty) {
-      Array.empty
+      EmptyEntries
     } else {
       val builder = Array.newBuilder[(String, Number)]
       builder.sizeHint((resettable.size + fixed.size) * 2)
@@ -58,7 +59,7 @@ object MetricsFormat {
 
   private def collectSorted(metrics: Iterable[Metric], reset: Boolean): Array[(String, Number)] = {
     if (metrics.isEmpty) {
-      Array.empty
+      EmptyEntries
     } else {
       val hint = metrics.knownSize
       val builder = Array.newBuilder[(String, Number)]
@@ -75,7 +76,7 @@ object MetricsFormat {
 
   private def collectSorted(stats: Map[String, Number]): Array[(String, Number)] = {
     if (stats.isEmpty) {
-      Array.empty
+      EmptyEntries
     } else {
       val arr = new Array[(String, Number)](stats.size)
       val it = stats.iterator

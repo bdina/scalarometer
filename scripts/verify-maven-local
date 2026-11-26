@@ -146,6 +146,7 @@ cat > "${tmp_consumer}/src/main/scala/consumer/Main.scala" <<'EOF'
 package consumer
 
 import com.scalarometer.statistics._
+import java.time.Duration
 
 object Main {
   def main(args: Array[String]): Unit = {
@@ -164,6 +165,25 @@ object Main {
     require(snap("req").longValue() == 2L, s"unexpected req=${snap("req")}")
     require(snap("workers").intValue() == 4, s"unexpected workers=${snap("workers")}")
     require(h.percentileValue(Histogram.Percentile.P_050) == 10.0, "unexpected p50")
+
+    val sessionBytes = Counter("stream.bytes")
+    val scopedJson = reg.withScope(sessionBytes) {
+      val _ = (sessionBytes += 64L)
+      MetricsFormat.Json.format(reg)
+    }
+    require(scopedJson.contains("\"stream.bytes\":64"), s"unexpected json=$scopedJson")
+    require(!reg.contains("stream.bytes"), "scoped metric leaked after withScope")
+
+    var reported = ""
+    val reporter = PeriodicReporter.start(reg, Duration.ofHours(1), format = MetricsFormat.Logfmt, reset = false) { line =>
+      reported = line
+    }
+    try {
+      val _ = reporter.reportOnce()
+    } finally {
+      reporter.close()
+    }
+    require(reported.contains("req=2") && reported.contains("workers=4"), s"unexpected logfmt=$reported")
     println("DOWNSTREAM_CONSUMER_OK")
   }
 }

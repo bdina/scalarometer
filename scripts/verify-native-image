@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+# Compiles and executes an ephemeral GraalVM Native Image (--no-fallback) smoke binary
+# exercising Scalarometer's full Native-Image API without any reflection configuration.
+# Usage: ./scripts/verify-native-image
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+IMAGE="${IMAGE:-graalvm-dev}"
+TAG="${TAG:-latest}"
+MEMORY="${MEMORY:-8gb}"
+
+cd "${REPO_DIR}"
+
+echo "==> 1. Build shadow JAR in graalvm-dev"
+./scripts/docker-build gradle --no-daemon shadowJar --warning-mode all
+
+shadow_jar="$(ls -t "${REPO_DIR}"/build/libs/scalarometer-*-all.jar | head -n 1)"
+if [ -z "${shadow_jar}" ] || [ ! -f "${shadow_jar}" ]; then
+  echo "ERROR: shadow JAR not found under build/libs/" >&2
+  exit 1
+fi
+shadow_jar_name="$(basename "${shadow_jar}")"
+
+echo "==> 2. Compile and run GraalVM Native Image smoke binary (--no-fallback, zero reflect-config)"
+docker run --rm \
+  -v "${REPO_DIR}/build/libs:/libs:ro" \
+  --tmpfs "/work:rw,exec,nosuid,size=2g" \
+  -w "/work" \
+  --memory="${MEMORY}" \
+  "${IMAGE}:${TAG}" \
+  bash -euo pipefail -c '
+    cat > /work/NativeSmoke.scala <<'\''EOF'\''
+package smoke
+
+import com.scalarometer.statistics._
+import java.time.Duration
+
+object NativeSmoke {
+  def main(args: Array[String]): Unit = {
+    val registry = Registry()
+    val req = Counter("http.requests")
+    val batch = AggregateCounter("batch.size")
+    val lat = Histogram("http.latency.ms", max_snapshots = 64)
+    val workers = Gauge.int("workers.active")(4)
+    val uptime = Counter("service.uptime")
+
+    registry ++= List(req, batch, lat, workers)
+    registry.registerFixedCounter(uptime)
+
+    val _ = (req += 5L)
+    val _ = batch.increment(10L)
+    val _ = batch.increment(20L)
+    val _ = lat.incrementByAndRecordSnapshot(12L)
+    val _ = lat.incrementByAndRecordSnapshot(18L)
+    val _ = uptime.increment(100L)
+
+    val (timedRes, elapsedNs) = StopWatch.timedNanos { req.value + uptime.value }
+    val marker = StopWatch.Marker.now
+    require(timedRes == 105L && elapsedNs >= 0L && marker.elapsedNanos >= 0L)
+
+    val sessionCounter = Counter("stream.bytes")
+    val scopedLog = registry.withScope(sessionCounter) {
+      val _ = (sessionCounter += 2048L)
+      MetricsFormat.Logfmt.format(registry)
+    }
+    require(scopedLog.contains("stream.bytes=2048"), s"missing scoped metric: $scopedLog")
+    require(!registry.contains("stream.bytes"), "scoped metric not cleaned up")
+
+    val json = MetricsFormat.Json.format(registry)
+    require(json.contains("\"http.requests\":5") && json.contains("\"batch.size.avg\":15.0"), s"unexpected json: $json")
+
+    var emitted = ""
+    val reporter = PeriodicReporter.start(
+      registry = registry,
+      interval = Duration.ofHours(1),
+      format = MetricsFormat.Logfmt,
+      reset = true,
+      prefix = "[service:metrics] "
+    ) { line =>
+      emitted = line
+    }
+    try {
+      val _ = reporter.reportOnce()
+    } finally {
+      reporter.close()
+    }
+    require(emitted.startsWith("[service:metrics] "), s"missing prefix: $emitted")
+    require(emitted.contains("http.requests=5") && emitted.contains("service.uptime=100"), s"unexpected report: $emitted")
+    require(req.value == 0L && uptime.value == 100L, "resettable/fixed contract violated")
+
+    // Verify unregistered session metrics format cleanly without global registration
+    val ephemeral = Counter("ephemeral.frames")
+    val _ = ephemeral.increment(42L)
+    val streamLog = MetricsFormat.Logfmt.formatMetrics(List(ephemeral))
+    require(streamLog == "ephemeral.frames=42", s"unexpected streamLog: $streamLog")
+
+    println(emitted)
+    println(json)
+    println("NATIVE_IMAGE_SMOKE_OK")
+  }
+}
+EOF
+    mkdir -p /work/classes
+    scalac -release:17 -classpath "/libs/'"${shadow_jar_name}"'" -d /work/classes /work/NativeSmoke.scala
+    native-image --no-fallback -R:MinHeapSize=1m -R:MaxHeapSize=32m \
+      -cp "/work/classes:/libs/'"${shadow_jar_name}"'" \
+      smoke.NativeSmoke -o /work/native-smoke
+    ls -lh /work/native-smoke
+    output="$(/work/native-smoke)"
+    printf "%s\n" "${output}"
+    printf "%s\n" "${output}" | grep -q "NATIVE_IMAGE_SMOKE_OK"
+  '
+
+echo "==> SUCCESS: GraalVM Native Image smoke binary compiled and passed"
