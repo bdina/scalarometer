@@ -1,0 +1,193 @@
+#!/usr/bin/env bash
+# End-to-end verification of local ~/.m2 publishing and downstream Scala 3 consumption.
+# Uses isolated temporary directories so the caller's real ~/.m2 is never modified.
+# Usage: ./scripts/verify-maven-local
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+IMAGE="${IMAGE:-graalvm-dev}"
+TAG="${TAG:-latest}"
+MEMORY="${MEMORY:-8gb}"
+
+tmp_root="$(mktemp -d)"
+tmp_m2="${tmp_root}/m2"
+tmp_consumer="${tmp_root}/consumer"
+mkdir -p "${tmp_m2}" "${tmp_consumer}/src/main/scala/consumer" "${tmp_consumer}/build" "${tmp_consumer}/.gradle"
+
+cleanup() {
+  rm -rf "${tmp_root}"
+}
+trap cleanup EXIT
+
+cd "${REPO_DIR}"
+
+echo "==> 1. Verify dirty-version publish guard rejects .dirty versions"
+if M2_DIR="${tmp_m2}" ./docker-publish-local.sh --skip-tests --version 0.0.0.dirty >/dev/null 2>&1; then
+  echo "ERROR: dirty-version guard failed to reject 0.0.0.dirty" >&2
+  exit 1
+fi
+if [ -e "${tmp_m2}/repository/com/scalarometer" ]; then
+  echo "ERROR: dirty publish wrote files to M2_DIR before failing" >&2
+  exit 1
+fi
+
+echo "==> 2. Publish clean artifact to isolated M2_DIR"
+M2_DIR="${tmp_m2}" ./docker-publish-local.sh --skip-tests
+
+artifact_root="${tmp_m2}/repository/com/scalarometer/scalarometer_3"
+metadata_xml="${artifact_root}/maven-metadata-local.xml"
+test -f "${metadata_xml}"
+
+published_version="$(sed -n 's:.*<release>\(.*\)</release>.*:\1:p' "${metadata_xml}" | head -n 1)"
+if [ -z "${published_version}" ]; then
+  published_version="$(sed -n 's:.*<version>\(.*\)</version>.*:\1:p' "${metadata_xml}" | tail -n 1)"
+fi
+if [ -z "${published_version}" ]; then
+  echo "ERROR: unable to determine published version from ${metadata_xml}" >&2
+  cat "${metadata_xml}" >&2
+  exit 1
+fi
+
+case "${published_version}" in
+  *.dirty)
+    echo "ERROR: published version unexpectedly has .dirty suffix: ${published_version}" >&2
+    exit 1
+    ;;
+  v[0-9]*)
+    echo "ERROR: published version should follow Maven SemVer without leading 'v': ${published_version}" >&2
+    exit 1
+    ;;
+esac
+
+ver_dir="${artifact_root}/${published_version}"
+jar_file="${ver_dir}/scalarometer_3-${published_version}.jar"
+sources_file="${ver_dir}/scalarometer_3-${published_version}-sources.jar"
+pom_file="${ver_dir}/scalarometer_3-${published_version}.pom"
+module_file="${ver_dir}/scalarometer_3-${published_version}.module"
+
+echo "==> 3. Verify published artifacts, POM, Gradle module metadata, TASTy files, and host ownership"
+for f in "${jar_file}" "${sources_file}" "${pom_file}" "${module_file}"; do
+  if [ ! -f "${f}" ]; then
+    echo "ERROR: missing expected published artifact: ${f}" >&2
+    exit 1
+  fi
+done
+
+if [ -e "${ver_dir}/scalarometer_3-${published_version}-all.jar" ]; then
+  echo "ERROR: fat shadow JAR should not be published to mavenLocal" >&2
+  exit 1
+fi
+
+grep -q '<artifactId>scalarometer_3</artifactId>' "${pom_file}"
+grep -q '<artifactId>scala3-library_3</artifactId>' "${pom_file}"
+grep -q 'MIT License' "${pom_file}"
+if grep -Eq 'scala3-compiler_3|scalatest' "${pom_file}"; then
+  echo "ERROR: unexpected compiler/test dependency leaked into POM" >&2
+  exit 1
+fi
+
+grep -q '"apiElements"' "${module_file}"
+grep -q '"runtimeElements"' "${module_file}"
+grep -q '"sourcesElements"' "${module_file}"
+if grep -q '"shadowRuntimeElements"' "${module_file}"; then
+  echo "ERROR: shadowRuntimeElements should be skipped in Gradle module metadata" >&2
+  exit 1
+fi
+
+jar_entries="$(docker run --rm -v "${ver_dir}:/check:ro" "${IMAGE}:${TAG}" jar tf "/check/scalarometer_3-${published_version}.jar")"
+printf '%s\n' "${jar_entries}" | grep -q 'com/scalarometer/statistics/Counter.class'
+printf '%s\n' "${jar_entries}" | grep -q 'com/scalarometer/statistics/Counter.tasty'
+
+expected_owner="$(id -u):$(id -g)"
+while IFS= read -r path; do
+  actual_owner="$(stat -c '%u:%g' "${path}")"
+  if [ "${actual_owner}" != "${expected_owner}" ]; then
+    echo "ERROR: ${path} owned by ${actual_owner}, expected ${expected_owner}" >&2
+    exit 1
+  fi
+done < <(find "${tmp_m2}/repository/com")
+
+echo "==> 4. Verify downstream Scala 3 Gradle project consumes com.scalarometer:scalarometer_3:${published_version} from read-only ~/.m2"
+cat > "${tmp_consumer}/settings.gradle" <<'EOF'
+rootProject.name = 'scalarometer-consumer-smoke'
+EOF
+
+cat > "${tmp_consumer}/build.gradle" <<EOF
+plugins {
+  id 'scala'
+  id 'application'
+}
+
+repositories {
+  mavenLocal {
+    content {
+      includeGroup 'com.scalarometer'
+    }
+  }
+  mavenCentral()
+}
+
+dependencies {
+  implementation 'com.scalarometer:scalarometer_3:${published_version}'
+}
+
+tasks.withType(ScalaCompile).configureEach {
+  scalaCompileOptions.additionalParameters = ['-release:17']
+}
+
+application {
+  mainClass = 'consumer.Main'
+}
+EOF
+
+cat > "${tmp_consumer}/src/main/scala/consumer/Main.scala" <<'EOF'
+package consumer
+
+import com.scalarometer.statistics._
+
+object Main {
+  def main(args: Array[String]): Unit = {
+    val reg = Registry()
+    val c = Counter("req")
+    val h = Histogram("lat")
+    val g = Gauge.int("workers")(4)
+    reg ++= List(c, h, g)
+    val _ = (c += 2L)
+    val _ = h.incrementByAndRecordSnapshot(10L)
+    val (res, ns) = StopWatch.timedNanos { c.value + h.snapshotValues(0) }
+    val marker = StopWatch.Marker.now
+    val snap = reg.stats(reset = false)
+    require(res == 12L, s"unexpected res=$res")
+    require(ns >= 0L && marker.elapsedNanos >= 0L, "invalid stopwatch elapsed")
+    require(snap("req").longValue() == 2L, s"unexpected req=${snap("req")}")
+    require(snap("workers").intValue() == 4, s"unexpected workers=${snap("workers")}")
+    require(h.percentileValue(Histogram.Percentile.P_050) == 10.0, "unexpected p50")
+    println("DOWNSTREAM_CONSUMER_OK")
+  }
+}
+EOF
+
+consumer_out="$(docker run --rm \
+  -e JAVA_TOOL_OPTIONS="--sun-misc-unsafe-memory-access=allow --enable-native-access=ALL-UNNAMED" \
+  -e GRADLE_USER_HOME="/cache/gradle" \
+  -e GRADLE_OPTS="-Dorg.gradle.welcome=never -XX:TieredStopAtLevel=1 -XX:+UseParallelGC" \
+  -v "${REPO_DIR}/.gradle-docker:/cache/gradle" \
+  --tmpfs "/cache/gradle/daemon:rw,nosuid,size=128m" \
+  --tmpfs "/cache/gradle/.tmp:rw,nosuid,size=128m" \
+  --tmpfs "/cache/gradle/notifications:rw,nosuid,size=16m" \
+  --tmpfs "/tmp:rw,exec,nosuid,size=512m" \
+  -v "${tmp_m2}:/root/.m2:ro" \
+  -v "${tmp_consumer}:/consumer" \
+  --tmpfs "/consumer/build:rw,nosuid,size=256m" \
+  --tmpfs "/consumer/.gradle:rw,nosuid,size=64m" \
+  -w "/consumer" \
+  --memory="${MEMORY}" \
+  "${IMAGE}:${TAG}" \
+  gradle --no-daemon --no-build-cache run --quiet)"
+
+printf '%s\n' "${consumer_out}"
+printf '%s\n' "${consumer_out}" | grep -q 'DOWNSTREAM_CONSUMER_OK'
+
+echo "==> SUCCESS: Verified com.scalarometer:scalarometer_3:${published_version} local Maven publish & downstream consumption"
