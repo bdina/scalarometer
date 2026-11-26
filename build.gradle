@@ -1,3 +1,7 @@
+import java.nio.file.Files
+import java.nio.file.Path
+import org.gradle.api.GradleException
+import org.gradle.api.publish.maven.tasks.PublishToMavenLocal
 import org.gradle.api.tasks.testing.TestDescriptor
 import org.gradle.api.tasks.testing.TestListener
 import org.gradle.api.tasks.testing.TestResult
@@ -27,8 +31,19 @@ plugins {
   id 'com.palantir.git-version' version '1.0.0'
 }
 
+ext {
+  scala_maj = '3'
+  scala_ver = "${scala_maj}.9.0"
+  scala_test = '3.2.20'
+}
+
+def rawGitVersion = file('.git').exists() ? gitVersion() : '0.0.0-bootstrap'
+def isDirtyGitTree = rawGitVersion.endsWith('.dirty')
+def normalizedGitVersion = rawGitVersion.replaceFirst(/^v(?=\d)/, '')
+def publishVersionOverride = providers.gradleProperty('publishVersion').orNull?.trim()
+
 group = 'com.scalarometer'
-version = file('.git').exists() ? gitVersion() : '0.0.0-bootstrap'
+version = (publishVersionOverride && !publishVersionOverride.isEmpty()) ? publishVersionOverride : normalizedGitVersion
 
 repositories {
   mavenCentral()
@@ -36,12 +51,6 @@ repositories {
 
 configurations {
   replCompiler
-}
-
-ext {
-  scala_maj = '3'
-  scala_ver = "${scala_maj}.9.0"
-  scala_test = '3.2.20'
 }
 
 dependencies {
@@ -139,11 +148,82 @@ shadowJar {
   mergeServiceFiles()
 }
 
+def publishedArtifactId = "${project.name}_${scala_maj}"
+def resolvedGroup = project.group.toString()
+def resolvedVersion = project.version.toString()
+
+components.java.withVariantsFromConfiguration(configurations.shadowRuntimeElements) {
+  skip()
+}
+
 publishing {
   publications {
     mavenJava(MavenPublication) {
+      artifactId = publishedArtifactId
       from components.java
+      pom {
+        name = 'Scalarometer'
+        description = 'Lightweight, thread-safe Scala 3 LTS metrics and telemetry library for JVM and GraalVM Native Image'
+        url = 'https://github.com/bdina/scalarometer'
+        licenses {
+          license {
+            name = 'MIT License'
+            url = 'https://opensource.org/licenses/MIT'
+          }
+        }
+        scm {
+          connection = 'scm:git:git://github.com/bdina/scalarometer.git'
+          developerConnection = 'scm:git:ssh://github.com/bdina/scalarometer.git'
+          url = 'https://github.com/bdina/scalarometer'
+        }
+      }
     }
+  }
+}
+
+def allowDirtyPublish = providers.gradleProperty('allowDirtyPublish').map { it.toBoolean() }.orElse(false)
+
+tasks.withType(PublishToMavenLocal).configureEach {
+  doFirst {
+    if ((resolvedVersion.endsWith('.dirty') || isDirtyGitTree) && !allowDirtyPublish.get()) {
+      throw new GradleException(
+        "Refusing to publish dirty version '${resolvedVersion}' (gitVersion='${rawGitVersion}') to Maven Local. " +
+        "Commit or stash changes first, or pass -PallowDirtyPublish=true to override."
+      )
+    }
+  }
+  doLast {
+    def m2RepoPath = System.getProperty('maven.repo.local') ?: "${System.getProperty('user.home')}/.m2/repository"
+    def m2Repo = Path.of(m2RepoPath)
+    def groupSegments = resolvedGroup.split('\\.')
+    def artifactDir = m2Repo.resolve(groupSegments.join('/')).resolve(publishedArtifactId)
+
+    def hostUidStr = System.getenv('HOST_UID')
+    def hostGidStr = System.getenv('HOST_GID')
+    if (hostUidStr?.isInteger() && hostGidStr?.isInteger() && Files.exists(artifactDir)) {
+      int hostUid = hostUidStr.toInteger()
+      int hostGid = hostGidStr.toInteger()
+      try {
+        Path walkDir = m2Repo
+        for (String seg : groupSegments) {
+          walkDir = walkDir.resolve(seg)
+          if (Files.exists(walkDir) && Files.getAttribute(walkDir, 'unix:uid') == 0) {
+            Files.setAttribute(walkDir, 'unix:uid', hostUid)
+            Files.setAttribute(walkDir, 'unix:gid', hostGid)
+          }
+        }
+        Files.walk(artifactDir).withCloseable { stream ->
+          stream.forEach { Path p ->
+            Files.setAttribute(p, 'unix:uid', hostUid)
+            Files.setAttribute(p, 'unix:gid', hostGid)
+          }
+        }
+      } catch (UnsupportedOperationException ignored) {
+        // Non-POSIX filesystem; skip ownership adjustment.
+      }
+    }
+
+    logger.lifecycle("Published ${resolvedGroup}:${publishedArtifactId}:${resolvedVersion} to ${m2Repo}")
   }
 }
 
