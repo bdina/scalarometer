@@ -132,6 +132,9 @@ def scalaCompilerParams = [
   , '-no-indent'
   , '-explain'
   , '-language:noAutoTupling'
+  , '-language:strictEquality'
+  , '-opt'
+  , '-opt-inline:com.scalarometer.statistics.**'
   , '-Werror'
   , '-Wnonunit-statement'
   , '-Wsafe-init'
@@ -147,6 +150,10 @@ tasks.withType(org.gradle.api.tasks.scala.ScalaCompile).configureEach {
 
 tasks.named('compileTestScala').configure {
   scalaCompileOptions.additionalParameters = scalaCompilerParams.findAll {
-    it != '-Wnonunit-statement' && it != '-Wvalue-discard'
+    it != '-Wnonunit-statement' &&
+      it != '-Wvalue-discard' &&
+      it != '-language:strictEquality' &&
+      it != '-opt' &&
+      !it.startsWith('-opt-inline:')
   }
 }
