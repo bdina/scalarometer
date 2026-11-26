@@ -1,40 +1,62 @@
 package com.scalarometer.statistics
 
-@SerialVersionUID(20200724110900L)
-class Histogram(name: String, val max_snapshots: Int = 1024) extends Counter(name) with SnapshotableMetric {
+import java.util.Arrays
+import scala.collection.mutable
+
+@SerialVersionUID(20261126010000L)
+open class Histogram(name: String, val max_snapshots: Int = 1024) extends Counter(name) with SnapshotableMetric {
   import Histogram.Percentile
 
-  private var list_of_counts: Vector[Long] = Vector.empty
+  private var buffer: Array[Long] = Array.emptyLongArray
+  private var snapshotCount: Int = 0
   private var prev: Long = 0L
   private var capLogged: Boolean = false
 
   protected val nameMean: String = s"$name.mean"
   protected val nameStdv: String = s"$name.stdv"
 
-  protected val name000Percentile: String = s"$name.${Percentile.P_000.toDouble}"
-  protected val name025Percentile: String = s"$name.${Percentile.P_025.toDouble}"
-  protected val name050Percentile: String = s"$name.${Percentile.P_050.toDouble}"
-  protected val name075Percentile: String = s"$name.${Percentile.P_075.toDouble}"
-  protected val name095Percentile: String = s"$name.${Percentile.P_095.toDouble}"
-  protected val name099Percentile: String = s"$name.${Percentile.P_099.toDouble}"
-  protected val name100Percentile: String = s"$name.${Percentile.P_100.toDouble}"
+  private val percentileKeys: Array[String] = {
+    val all = Histogram.allPercentiles
+    val keys = new Array[String](all.length)
+    var i = 0
+    while (i < all.length) {
+      keys(i) = s"$name.${all(i).suffix}"
+      i += 1
+    }
+    keys
+  }
 
-  private val percentileNames: Array[(Percentile, String)] =
-    Percentile.values.map(p => p -> s"$name.${p.toDouble}")
+  def percentileKey(p: Percentile): String = percentileKeys(p.ordinal)
 
-  def numberOfSnapshots: Int = synchronized { list_of_counts.size }
-  def isEmpty: Boolean = synchronized { list_of_counts.isEmpty }
+  def numberOfSnapshots: Int = synchronized { snapshotCount }
+  def isEmpty: Boolean = synchronized { snapshotCount == 0 }
   def nonEmpty: Boolean = !isEmpty
 
-  def recordSnapshot(): Unit = synchronized {
-    if (list_of_counts.size < max_snapshots) {
-      val current = value
-      list_of_counts = list_of_counts :+ (current - prev)
+  private def ensureCapacityLocked(): Unit = {
+    val currentLen = buffer.length
+    if (snapshotCount == currentLen) {
+      val nextLen =
+        if (currentLen == 0) math.min(Histogram.InitialBufferCapacity, max_snapshots)
+        else if (currentLen >= max_snapshots / 2) max_snapshots
+        else currentLen * 2
+      buffer = Arrays.copyOf(buffer, nextLen)
+    }
+  }
+
+  private def recordDeltaLocked(current: Long): Unit = {
+    if (snapshotCount < max_snapshots) {
+      ensureCapacityLocked()
+      buffer(snapshotCount) = current - prev
+      snapshotCount += 1
       prev = current
     } else if (!capLogged) {
       capLogged = true
       logFine(s"Histogram '$name' reached max_snapshots cap ($max_snapshots); dropping additional snapshots until reset")
     }
+  }
+
+  def recordSnapshot(): Unit = synchronized {
+    recordDeltaLocked(value)
   }
 
   def incrementAndRecordSnapshot(): Unit = {
@@ -43,106 +65,183 @@ class Histogram(name: String, val max_snapshots: Int = 1024) extends Counter(nam
 
   def incrementByAndRecordSnapshot(count: Long): Long = synchronized {
     val updated = increment(count)
-    recordSnapshot()
+    recordDeltaLocked(updated)
     updated
   }
 
-  def values: Vector[Long] = synchronized { list_of_counts }
-
-  override def snapshots: Vector[Number] = synchronized {
-    list_of_counts.map(java.lang.Long.valueOf)
+  def snapshotsArray: Array[Long] = synchronized {
+    if (snapshotCount == 0) Array.emptyLongArray
+    else Arrays.copyOf(buffer, snapshotCount)
   }
 
-  def snapshotsArray: Array[Long] = synchronized { list_of_counts.toArray }
+  def snapshotValues: IArray[Long] = IArray.unsafeFromArray(snapshotsArray)
 
-  def snapshotsSortedArray: Array[Long] = snapshotsArray.sorted
+  def snapshotsSortedArray: Array[Long] = {
+    val arr = snapshotsArray
+    if (arr.length > 1) Arrays.sort(arr)
+    arr
+  }
+
+  def values: Vector[Long] = {
+    val arr = snapshotsArray
+    val builder = Vector.newBuilder[Long]
+    builder.sizeHint(arr.length)
+    var i = 0
+    while (i < arr.length) {
+      val _ = builder.addOne(arr(i))
+      i += 1
+    }
+    builder.result()
+  }
+
+  override def snapshots: Vector[Number] = {
+    val arr = snapshotsArray
+    val builder = Vector.newBuilder[Number]
+    builder.sizeHint(arr.length)
+    var i = 0
+    while (i < arr.length) {
+      val _ = builder.addOne(java.lang.Long.valueOf(arr(i)))
+      i += 1
+    }
+    builder.result()
+  }
 
   override def data(reset: Boolean = false): Map[String, Number] = {
-    val (currentCount, snapshotCounts) = synchronized {
-      val snapshot = (value, list_of_counts)
+    val builder = Map.newBuilder[String, Number]
+    builder.sizeHint(3 + percentileKeys.length)
+    appendData(builder, reset)
+    builder.result()
+  }
+
+  override def appendData(builder: mutable.Builder[(String, Number), ?], reset: Boolean = false): Unit = {
+    var currentCount = 0L
+    var snapshotCopy: Array[Long] = Array.emptyLongArray
+    synchronized {
+      currentCount = value
+      if (snapshotCount > 0) {
+        snapshotCopy = Arrays.copyOf(buffer, snapshotCount)
+      }
       if (reset) this.reset()
-      snapshot
     }
-    val sortedValues = snapshotCounts.toArray.sorted
-    val currentMean = computeMean(snapshotCounts)
-    val currentStdv = Math.sqrt(computeVariance(snapshotCounts, currentMean))
-    val base = Map[String, Number](
-      name -> java.lang.Long.valueOf(currentCount),
-      nameMean -> java.lang.Double.valueOf(currentMean),
-      nameStdv -> java.lang.Double.valueOf(currentStdv)
-    )
-    percentileNames.foldLeft(base) { (acc, entry) =>
-      val (p, key) = entry
-      acc.updated(key, percentile(p, sortedValues))
+    val currentMean = computeMean(snapshotCopy)
+    val currentStdv = Math.sqrt(computeVariance(snapshotCopy, currentMean))
+    if (snapshotCopy.length > 1) Arrays.sort(snapshotCopy)
+
+    val _ = builder
+      .addOne((name, java.lang.Long.valueOf(currentCount)))
+      .addOne((nameMean, java.lang.Double.valueOf(currentMean)))
+      .addOne((nameStdv, java.lang.Double.valueOf(currentStdv)))
+
+    val all = Histogram.allPercentiles
+    var i = 0
+    while (i < all.length) {
+      val _ = builder.addOne((percentileKeys(i), java.lang.Double.valueOf(percentileValue(all(i), snapshotCopy))))
+      i += 1
     }
   }
 
   override def reset(): Unit = synchronized {
     super.reset()
     prev = 0L
-    list_of_counts = Vector.empty
+    snapshotCount = 0
     capLogged = false
   }
 
-  def mean: Double = {
-    val snapshotCounts = synchronized { list_of_counts }
-    computeMean(snapshotCounts)
-  }
+  def mean: Double = computeMean(snapshotsArray)
 
   def variance: Double = {
-    val snapshotCounts = synchronized { list_of_counts }
-    computeVariance(snapshotCounts, computeMean(snapshotCounts))
+    val snapshotCopy = snapshotsArray
+    computeVariance(snapshotCopy, computeMean(snapshotCopy))
   }
 
   def standard_deviation: Double = Math.sqrt(variance)
 
-  def percentile(p: Percentile, counts: Array[Long]): Number = counts.length match {
-    case 0 =>
-      java.lang.Double.valueOf(0.0)
-    case 1 =>
-      java.lang.Double.valueOf(counts(0).toDouble)
-    case len =>
-      val index = p.toDouble * (len - 1.0)
-      val floor = Math.floor(index)
-      val ceiling = Math.ceil(index)
-
-      if (floor == ceiling) {
-        java.lang.Double.valueOf(counts(index.toInt).toDouble)
+  def percentileValue(p: Percentile, counts: Array[Long]): Double = {
+    val len = counts.length
+    if (len == 0) {
+      0.0
+    } else if (len == 1) {
+      counts(0).toDouble
+    } else {
+      val index = p.toDouble * (len - 1)
+      val lowerIdx = index.toInt
+      val frac = index - lowerIdx
+      if (frac == 0.0 || lowerIdx >= len - 1) {
+        counts(lowerIdx).toDouble
       } else {
-        val lower = counts(floor.toInt) * (ceiling - index)
-        val upper = counts(ceiling.toInt) * (index - floor)
-        java.lang.Double.valueOf(lower + upper)
+        counts(lowerIdx) * (1.0 - frac) + counts(lowerIdx + 1) * frac
       }
+    }
   }
 
-  def percentile(p: Percentile): Number = percentile(p, snapshotsSortedArray)
+  def percentileValue(p: Percentile): Double = percentileValue(p, snapshotsSortedArray)
+
+  def percentile(p: Percentile, counts: Array[Long]): Number =
+    java.lang.Double.valueOf(percentileValue(p, counts))
+
+  def percentile(p: Percentile): Number =
+    java.lang.Double.valueOf(percentileValue(p, snapshotsSortedArray))
 
   override def toString(): String = {
-    val (currentCount, snapshotCounts) = synchronized { (value, list_of_counts) }
-    val currentMean = computeMean(snapshotCounts)
-    val currentStdv = Math.sqrt(computeVariance(snapshotCounts, currentMean))
+    var currentCount = 0L
+    var snapshotCopy: Array[Long] = Array.emptyLongArray
+    synchronized {
+      currentCount = value
+      if (snapshotCount > 0) {
+        snapshotCopy = Arrays.copyOf(buffer, snapshotCount)
+      }
+    }
+    val currentMean = computeMean(snapshotCopy)
+    val currentStdv = Math.sqrt(computeVariance(snapshotCopy, currentMean))
     s"count: $currentCount mean: $currentMean standard deviation: $currentStdv"
   }
 
-  private def computeMean(counts: Vector[Long]): Double =
-    if (counts.isEmpty) 0.0
-    else counts.foldLeft(0.0)((acc, count) => acc + count.toDouble) / counts.size
+  private def computeMean(counts: Array[Long]): Double = {
+    val len = counts.length
+    if (len == 0) {
+      0.0
+    } else {
+      var sum = 0.0
+      var i = 0
+      while (i < len) {
+        sum += counts(i).toDouble
+        i += 1
+      }
+      sum / len
+    }
+  }
 
-  private def computeVariance(counts: Vector[Long], currentMean: Double): Double =
-    if (counts.isEmpty) 0.0
-    else counts.foldLeft(0.0)((acc, count) => acc + (currentMean - count.toDouble) * (currentMean - count.toDouble)) / counts.size
+  private def computeVariance(counts: Array[Long], currentMean: Double): Double = {
+    val len = counts.length
+    if (len == 0) {
+      0.0
+    } else {
+      var sumSq = 0.0
+      var i = 0
+      while (i < len) {
+        val diff = currentMean - counts(i).toDouble
+        sumSq += diff * diff
+        i += 1
+      }
+      sumSq / len
+    }
+  }
 }
 
 object Histogram {
-  enum Percentile(val toDouble: Double) {
-    case P_000 extends Percentile(0.00)
-    case P_025 extends Percentile(0.25)
-    case P_050 extends Percentile(0.50)
-    case P_075 extends Percentile(0.75)
-    case P_095 extends Percentile(0.95)
-    case P_099 extends Percentile(0.99)
-    case P_100 extends Percentile(1.00)
+  private val InitialBufferCapacity: Int = 16
+
+  enum Percentile(val toDouble: Double, val suffix: String) derives CanEqual {
+    case P_000 extends Percentile(0.00, "0.0")
+    case P_025 extends Percentile(0.25, "0.25")
+    case P_050 extends Percentile(0.50, "0.5")
+    case P_075 extends Percentile(0.75, "0.75")
+    case P_095 extends Percentile(0.95, "0.95")
+    case P_099 extends Percentile(0.99, "0.99")
+    case P_100 extends Percentile(1.00, "1.0")
   }
+
+  val allPercentiles: IArray[Percentile] = IArray.unsafeFromArray(Percentile.values)
 
   def apply(name: String, max_snapshots: Int = 1024): Histogram = new Histogram(name, max_snapshots)
 }

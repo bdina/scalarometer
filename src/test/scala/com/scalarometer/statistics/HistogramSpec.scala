@@ -95,6 +95,86 @@ class HistogramSpec extends AnyFlatSpec with Matchers {
     h.value shouldBe 0L
   }
 
+  it should "handle edge max_snapshots caps, lazy buffer growth, IArray snapshots, and appendData" in {
+    val zeroCap = Histogram("zero.cap", max_snapshots = 0)
+    zeroCap.incrementByAndRecordSnapshot(5L) shouldBe 5L
+    zeroCap.isEmpty shouldBe true
+    zeroCap.numberOfSnapshots shouldBe 0
+    zeroCap.snapshotValues.length shouldBe 0
+    zeroCap.percentileValue(Percentile.P_050) shouldBe 0.0
+
+    val oneCap = Histogram("one.cap", max_snapshots = 1)
+    oneCap.incrementByAndRecordSnapshot(9L) shouldBe 9L
+    oneCap.incrementByAndRecordSnapshot(11L) shouldBe 20L
+    oneCap.numberOfSnapshots shouldBe 1
+    oneCap.snapshotValues.toVector shouldBe Vector(9L)
+    oneCap.percentileValue(Percentile.P_099) shouldBe 9.0
+
+    val growing = Histogram("grow", max_snapshots = 100)
+    for (i <- 1 to 120) {
+      growing.incrementByAndRecordSnapshot(i.toLong)
+    }
+    growing.numberOfSnapshots shouldBe 100
+    growing.snapshotValues.length shouldBe 100
+    growing.snapshotValues(0) shouldBe 1L
+    growing.snapshotValues(99) shouldBe 100L
+    growing.percentileValue(Percentile.P_000) shouldBe 1.0 +- 1e-9
+    growing.percentileValue(Percentile.P_050) shouldBe 50.5 +- 1e-9
+    growing.percentileValue(Percentile.P_100) shouldBe 100.0 +- 1e-9
+    growing.percentileKey(Percentile.P_095) shouldBe "grow.0.95"
+
+    val builder = Map.newBuilder[String, Number]
+    growing.appendData(builder, reset = true)
+    val built = builder.result()
+    built("grow").longValue() shouldBe (1L to 120L).sum
+    built("grow.0.5").doubleValue() shouldBe 50.5 +- 1e-9
+    growing.isEmpty shouldBe true
+
+    // Reuse internal buffer after reset with negative and positive deltas
+    growing.increment(-10L)
+    growing.recordSnapshot()
+    growing.increment(30L)
+    growing.recordSnapshot()
+    growing.values shouldBe Vector(-10L, 30L)
+    growing.mean shouldBe 10.0
+  }
+
+  it should "handle concurrent increments, snapshots, and atomic data resets safely" in {
+    val h = Histogram("concurrent.reset.hist", max_snapshots = 2048)
+    val threads = 4
+    val perThread = 500
+    val pool = Executors.newFixedThreadPool(threads)
+    val startLatch = new CountDownLatch(1)
+    val doneLatch = new CountDownLatch(threads)
+    val collectedTotal = new java.util.concurrent.atomic.AtomicLong(0L)
+
+    try {
+      for (t <- 0 until threads) {
+        pool.submit(new Runnable {
+          override def run(): Unit = {
+            startLatch.await()
+            var i = 0
+            while (i < perThread) {
+              h.incrementByAndRecordSnapshot(2L)
+              if (t == 0 && i % 50 == 0) {
+                val snap = h.data(reset = true)
+                collectedTotal.addAndGet(snap("concurrent.reset.hist").longValue())
+              }
+              i += 1
+            }
+            doneLatch.countDown()
+          }
+        })
+      }
+      startLatch.countDown()
+      doneLatch.await(10, TimeUnit.SECONDS) shouldBe true
+      collectedTotal.addAndGet(h.data(reset = true)("concurrent.reset.hist").longValue())
+      collectedTotal.get() shouldBe (threads.toLong * perThread.toLong * 2L)
+    } finally {
+      pool.shutdownNow()
+    }
+  }
+
   it should "support Java serialization round-trip" in {
     val h = Histogram("ser.hist", max_snapshots = 16)
     h.incrementByAndRecordSnapshot(12L)
