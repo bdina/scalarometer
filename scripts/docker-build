@@ -8,13 +8,37 @@ TAG="${TAG:-latest}"
 
 mkdir -p "${PWD}/.gradle-docker" "${PWD}/.gradle-project-docker"
 
+resolve_global_gitignore() {
+  local excludes=""
+  if command -v git >/dev/null 2>&1; then
+    excludes="$(git config --path --get core.excludesFile 2>/dev/null || true)"
+  fi
+  if [ -z "${excludes}" ] && [ -f "${XDG_CONFIG_HOME:-${HOME}/.config}/git/ignore" ]; then
+    excludes="${XDG_CONFIG_HOME:-${HOME}/.config}/git/ignore"
+  fi
+  if [ -z "${excludes}" ] && [ -f "${HOME}/.gitignore_global" ]; then
+    excludes="${HOME}/.gitignore_global"
+  fi
+  if [ -n "${excludes}" ] && [ -f "${excludes}" ]; then
+    printf '%s\n' "${excludes}"
+  fi
+}
+
 run_docker() {
   local it_flags="$1"
   shift
+  local gitignore_args=()
+  local global_gitignore
+  global_gitignore="$(resolve_global_gitignore)"
+  if [ -n "${global_gitignore}" ]; then
+    gitignore_args=(-e XDG_CONFIG_HOME="/root/.config" -v "${global_gitignore}:/root/.config/git/ignore:ro")
+  fi
+
   docker run --name "${GIT_PROJECT}-build-$(date +%s)-$$" \
     -e JAVA_TOOL_OPTIONS="--sun-misc-unsafe-memory-access=allow --enable-native-access=ALL-UNNAMED" \
     -e GRADLE_USER_HOME="/git/${GIT_PROJECT}/.gradle-docker" \
     -e GRADLE_OPTS="-Dorg.gradle.projectcachedir=/git/${GIT_PROJECT}/.gradle-project-docker" \
+    ${gitignore_args[@]+"${gitignore_args[@]}"} \
     ${it_flags} \
     --rm \
     -v "${PWD}:/git/${GIT_PROJECT}/" \

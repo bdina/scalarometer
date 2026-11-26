@@ -5,9 +5,12 @@ build/
 buildSrc/build/
 buildSrc/.gradle/
 .cursor/
+AGENTS.md
+GEMINI.md
+CLAUDE.md
 **/*.iml
 .idea/
 .tags
 **/.tags
-docs/
-*.md
+*.swp
+.DS_Store

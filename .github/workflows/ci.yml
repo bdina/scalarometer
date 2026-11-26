@@ -22,7 +22,14 @@ jobs:
       - name: Build and test
         env:
           MEMORY: 6gb
-        run: ./scripts/docker-build gradle --no-daemon clean test jar shadowJar --warning-mode all
+        run: ./scripts/docker-build gradle --no-daemon clean test jar sourcesJar shadowJar --warning-mode all
+      - name: Verify clean artifact versioning
+        run: |
+          ls -la build/libs/scalarometer-*.jar
+          if compgen -G "build/libs/*.dirty*.jar" > /dev/null; then
+            echo "ERROR: dirty JAR artifacts detected" >&2
+            exit 1
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: scalarometer-jars
