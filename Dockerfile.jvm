@@ -8,20 +8,30 @@ FROM eclipse-temurin:${OPENJDK_VERSION}-jdk-alpine AS build
 ARG GRADLE_VERSION=9.9.2
 ARG OPENJDK_WORKDIR=/openjdk/src/project
 
-RUN apk update \
- && apk add --no-cache wget unzip \
+RUN apk add --no-cache wget unzip \
  && wget -q "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" -P /tmp \
  && unzip -q -d /opt "/tmp/gradle-${GRADLE_VERSION}-bin.zip" \
- && rm "/tmp/gradle-${GRADLE_VERSION}-bin.zip"
+ && rm -f "/tmp/gradle-${GRADLE_VERSION}-bin.zip"
 
 ENV GRADLE_HOME=/opt/gradle-${GRADLE_VERSION}
 ENV PATH=${GRADLE_HOME}/bin:${PATH}
 ENV JAVA_TOOL_OPTIONS="--sun-misc-unsafe-memory-access=allow --enable-native-access=ALL-UNNAMED"
+ENV GRADLE_OPTS="-Dorg.gradle.welcome=never -XX:TieredStopAtLevel=1 -XX:+UseParallelGC"
 
 WORKDIR ${OPENJDK_WORKDIR}
 
+COPY settings.gradle gradle.properties build.gradle ${OPENJDK_WORKDIR}/
+COPY buildSrc/build.gradle ${OPENJDK_WORKDIR}/buildSrc/
+COPY buildSrc/src ${OPENJDK_WORKDIR}/buildSrc/src
+RUN mkdir -p src/main/scala src/test/scala \
+ && printf 'package _bootstrap\nobject Main {}\n' > src/main/scala/_Bootstrap.scala \
+ && printf 'package _bootstrap\nobject TestMain {}\n' > src/test/scala/_BootstrapTest.scala \
+ && ${GRADLE_HOME}/bin/gradle --no-daemon --no-build-cache compileScala compileTestScala resolveDependencies --warning-mode all \
+ && rm -rf src build /root/.gradle/daemon /root/.gradle/.tmp /root/.gradle/notifications
+
 COPY . ${OPENJDK_WORKDIR}
-RUN ${GRADLE_HOME}/bin/gradle --no-daemon clean test jar shadowJar --warning-mode all
+RUN ${GRADLE_HOME}/bin/gradle --no-daemon --offline --no-build-cache test jar shadowJar --warning-mode all \
+ && rm -rf /root/.gradle/daemon /root/.gradle/.tmp /root/.gradle/notifications
 
 FROM eclipse-temurin:${OPENJDK_VERSION}-jre-alpine AS scalarometer
 

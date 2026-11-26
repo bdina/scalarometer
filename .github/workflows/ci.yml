@@ -15,6 +15,16 @@ jobs:
           fetch-depth: 0
       - name: Check script syntax
         run: bash -n scripts/docker-build && bash -n docker-build-test.sh
+      - name: Cache Gradle dependencies and Zinc bridge
+        uses: actions/cache@v4
+        with:
+          path: |
+            .gradle-docker/caches/modules-2
+            .gradle-docker/caches/jars-*
+            .gradle-docker/caches/zinc-*
+          key: gradle-${{ runner.os }}-${{ hashFiles('build.gradle', 'settings.gradle', 'gradle.properties', 'buildSrc/build.gradle') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
       - name: Build toolchain image (GraalVM + Gradle)
         env:
           DOCKER_BUILDKIT: "1"
@@ -22,7 +32,7 @@ jobs:
       - name: Build and test
         env:
           MEMORY: 6gb
-        run: ./scripts/docker-build gradle --no-daemon clean test jar sourcesJar shadowJar --warning-mode all
+        run: ./scripts/docker-build gradle --no-daemon --no-build-cache test jar sourcesJar shadowJar --warning-mode all
       - name: Verify clean artifact versioning
         run: |
           ls -la build/libs/scalarometer-*.jar
