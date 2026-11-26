@@ -5,11 +5,16 @@ MEMORY="${MEMORY:-8gb}"
 GIT_PROJECT="${PWD##*/}"
 IMAGE="${IMAGE:-graalvm-dev}"
 TAG="${TAG:-latest}"
+M2_DIR="${M2_DIR-${HOME}/.m2}"
 
 mkdir -p "${PWD}/.gradle-docker/daemon" \
   "${PWD}/.gradle-docker/.tmp" \
   "${PWD}/.gradle-docker/notifications" \
   "${PWD}/.gradle-project-docker"
+
+if [ -n "${M2_DIR}" ]; then
+  mkdir -p "${M2_DIR}/repository"
+fi
 
 resolve_global_gitignore() {
   local excludes=""
@@ -37,11 +42,17 @@ run_docker() {
     gitignore_args=(-e XDG_CONFIG_HOME="/root/.config" -v "${global_gitignore}:/root/.config/git/ignore:ro")
   fi
 
+  local m2_args=()
+  if [ -n "${M2_DIR}" ]; then
+    m2_args=(-v "${M2_DIR}:/root/.m2" -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)")
+  fi
+
   docker run --name "${GIT_PROJECT}-build-$(date +%s)-$$" \
     -e JAVA_TOOL_OPTIONS="--sun-misc-unsafe-memory-access=allow --enable-native-access=ALL-UNNAMED" \
     -e GRADLE_USER_HOME="/git/${GIT_PROJECT}/.gradle-docker" \
     -e GRADLE_OPTS="-Dorg.gradle.projectcachedir=/git/${GIT_PROJECT}/.gradle-project-docker -Dorg.gradle.welcome=never -XX:TieredStopAtLevel=1 -XX:+UseParallelGC" \
     ${gitignore_args[@]+"${gitignore_args[@]}"} \
+    ${m2_args[@]+"${m2_args[@]}"} \
     ${it_flags} \
     --rm \
     -v "${PWD}:/git/${GIT_PROJECT}/" \
