@@ -1,7 +1,23 @@
 package com.scalarometer.statistics
 
-import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
 import scala.annotation.tailrec
+
+final class MetricScope private[statistics] (
+    private val registry: Registry,
+    private val registered: IArray[Metric]
+) extends AutoCloseable {
+  private val closed: AtomicBoolean = new AtomicBoolean(false)
+
+  def isClosed: Boolean = closed.get()
+  def metrics: IArray[Metric] = registered
+
+  override def close(): Unit = {
+    if (closed.compareAndSet(false, true) && registered.length > 0) {
+      registry.unregisterScoped(registered)
+    }
+  }
+}
 
 open class Registry extends Statistics with Iterable[Metric] {
   import Registry.{EmptyBucket, MetricBucket}
@@ -139,6 +155,32 @@ open class Registry extends Statistics with Iterable[Metric] {
     this
   }
 
+  def scoped(metrics: Metric*): MetricScope = scopedAll(metrics)
+
+  def scopedAll(items: IterableOnce[Metric]): MetricScope = {
+    val arr = IArray.from(items)
+    if (arr.length > 0) {
+      val updated = registerArrayIn(countersRef, arr)
+      logFine(s"Scoped registered ${arr.length} metric(s) (total resettable: ${updated.size})")
+    }
+    new MetricScope(this, arr)
+  }
+
+  inline def withScope[A](metrics: Metric*)(inline block: A): A = {
+    val scope = scoped(metrics*)
+    try {
+      block
+    } finally {
+      scope.close()
+    }
+  }
+
+  private[statistics] def unregisterScoped(items: IArray[Metric]): Unit = {
+    val updatedResettable = unregisterArrayFrom(countersRef, items)
+    val updatedFixed = unregisterArrayFrom(fixedCountersRef, items)
+    logFine(s"Closed metric scope (${items.length} metric(s); remaining resettable: ${updatedResettable.size}, fixed: ${updatedFixed.size})")
+  }
+
   def clear(): Unit = {
     countersRef.set(EmptyBucket)
     fixedCountersRef.set(EmptyBucket)
@@ -195,6 +237,22 @@ open class Registry extends Statistics with Iterable[Metric] {
     if ((next eq current) || ref.compareAndSet(current, next)) next.metrics
     else unregisterAllFrom(ref, items)
   }
+
+  @tailrec
+  private def registerArrayIn(ref: AtomicReference[MetricBucket], items: IArray[Metric]): Set[Metric] = {
+    val current = ref.get()
+    val next = current.registerArray(items)
+    if ((next eq current) || ref.compareAndSet(current, next)) next.metrics
+    else registerArrayIn(ref, items)
+  }
+
+  @tailrec
+  private def unregisterArrayFrom(ref: AtomicReference[MetricBucket], items: IArray[Metric]): Set[Metric] = {
+    val current = ref.get()
+    val next = current.unregisterArray(items)
+    if ((next eq current) || ref.compareAndSet(current, next)) next.metrics
+    else unregisterArrayFrom(ref, items)
+  }
 }
 
 object Registry {
@@ -242,6 +300,33 @@ object Registry {
       var cur = this
       while (it.hasNext) {
         cur = cur.unregister(it.next())
+      }
+      cur
+    }
+
+    def registerArray(items: IArray[Metric]): MetricBucket = {
+      var curMetrics = metrics
+      var curByName = byName
+      var changed = false
+      var i = 0
+      while (i < items.length) {
+        val m = items(i)
+        if (!curMetrics.contains(m)) {
+          curMetrics = curMetrics + m
+          curByName = curByName.updated(m.name, m)
+          changed = true
+        }
+        i += 1
+      }
+      if (changed) new MetricBucket(curMetrics, curByName) else this
+    }
+
+    def unregisterArray(items: IArray[Metric]): MetricBucket = {
+      var cur = this
+      var i = 0
+      while (i < items.length) {
+        cur = cur.unregister(items(i))
+        i += 1
       }
       cur
     }

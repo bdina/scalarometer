@@ -144,6 +144,62 @@ class RegistrySpec extends AnyFlatSpec with Matchers {
     fixedVisited shouldBe 1
   }
 
+  it should "support AutoCloseable MetricScope via scoped, scopedAll, Using, and withScope" in {
+    val registry = Registry()
+    val persistent = Counter("service.uptime")
+    registry.registerFixedCounter(persistent)
+
+    val streamBytes = Counter("stream.bytes")
+    val streamLatency = Histogram("stream.latency")
+
+    val scope = registry.scoped(streamBytes, streamLatency)
+    scope.isClosed shouldBe false
+    scope.metrics.length shouldBe 2
+    registry.contains("stream.bytes") shouldBe true
+    registry.contains("stream.latency") shouldBe true
+    registry.size shouldBe 3
+
+    scope.close()
+    scope.isClosed shouldBe true
+    scope.close() // idempotent
+    registry.contains("stream.bytes") shouldBe false
+    registry.contains("stream.latency") shouldBe false
+    registry.contains("service.uptime") shouldBe true
+    registry.size shouldBe 1
+
+    val temp = Counter("temp.using")
+    val usingResult = scala.util.Using.resource(registry.scopedAll(List(temp))) { s =>
+      s.isClosed shouldBe false
+      registry.contains("temp.using") shouldBe true
+      temp.increment(5L)
+    }
+    usingResult shouldBe 5L
+    registry.contains("temp.using") shouldBe false
+
+    val scopedMetric = Counter("inline.scope")
+    val value = registry.withScope(scopedMetric) {
+      registry.contains("inline.scope") shouldBe true
+      scopedMetric.increment(9L)
+    }
+    value shouldBe 9L
+    registry.contains("inline.scope") shouldBe false
+
+    val failingMetric = Counter("failing.scope")
+    intercept[IllegalStateException] {
+      registry.withScope(failingMetric) {
+        registry.contains("failing.scope") shouldBe true
+        throw new IllegalStateException("boom")
+      }
+    }
+    registry.contains("failing.scope") shouldBe false
+    registry.contains("service.uptime") shouldBe true
+
+    val emptyScope = registry.scoped()
+    emptyScope.metrics.length shouldBe 0
+    emptyScope.close()
+    emptyScope.isClosed shouldBe true
+  }
+
   it should "support concurrent metric registration and stats snapshots" in {
     val registry = Registry()
     val threads = 6
