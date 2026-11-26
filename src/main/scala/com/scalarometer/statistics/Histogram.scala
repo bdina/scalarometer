@@ -28,7 +28,7 @@ class Histogram(name: String, val max_snapshots: Int = 1024) extends Counter(nam
 
   def recordSnapshot(): Unit = synchronized {
     if (list_of_counts.size < max_snapshots) {
-      val current = _count.get()
+      val current = value
       list_of_counts = list_of_counts :+ (current - prev)
       prev = current
     } else if (!capLogged) {
@@ -59,7 +59,7 @@ class Histogram(name: String, val max_snapshots: Int = 1024) extends Counter(nam
 
   override def data(reset: Boolean = false): Map[String, Number] = {
     val (currentCount, snapshotCounts) = synchronized {
-      val snapshot = (_count.get(), list_of_counts)
+      val snapshot = (value, list_of_counts)
       if (reset) this.reset()
       snapshot
     }
@@ -118,7 +118,7 @@ class Histogram(name: String, val max_snapshots: Int = 1024) extends Counter(nam
   def percentile(p: Percentile): Number = percentile(p, snapshotsSortedArray)
 
   override def toString(): String = {
-    val (currentCount, snapshotCounts) = synchronized { (_count.get(), list_of_counts) }
+    val (currentCount, snapshotCounts) = synchronized { (value, list_of_counts) }
     val currentMean = computeMean(snapshotCounts)
     val currentStdv = Math.sqrt(computeVariance(snapshotCounts, currentMean))
     s"count: $currentCount mean: $currentMean standard deviation: $currentStdv"

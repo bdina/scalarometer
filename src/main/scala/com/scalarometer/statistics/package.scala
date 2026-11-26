@@ -32,6 +32,13 @@ trait CountableMetric {
 trait Metric {
   def name: String
   def data(reset: Boolean = false): Map[String, Number]
+
+  def appendData(
+      builder: scala.collection.mutable.Builder[(String, Number), ?],
+      reset: Boolean = false
+  ): Unit = {
+    val _ = builder ++= data(reset)
+  }
 }
 
 trait SnapshotableMetric {

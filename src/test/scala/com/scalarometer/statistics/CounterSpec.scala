@@ -66,6 +66,60 @@ class CounterSpec extends AnyFlatSpec with Matchers {
     c.value shouldBe 0L
   }
 
+  it should "append data directly into a builder without intermediate maps and inline primitive storage" in {
+    val c = Counter("inline.hits")
+    c.increment(11L)
+
+    val b1 = Map.newBuilder[String, Number]
+    c.appendData(b1, reset = false)
+    b1.result() shouldBe Map("inline.hits" -> java.lang.Long.valueOf(11L))
+    c.value shouldBe 11L
+
+    val b2 = Map.newBuilder[String, Number]
+    c.appendData(b2, reset = true)
+    b2.result() shouldBe Map("inline.hits" -> java.lang.Long.valueOf(11L))
+    c.value shouldBe 0L
+
+    val fields = classOf[Counter].getDeclaredFields
+    fields.exists(f => f.getName == "_value" && f.getType == java.lang.Long.TYPE) shouldBe true
+    fields.exists(_.getType == classOf[java.util.concurrent.atomic.AtomicLong]) shouldBe false
+  }
+
+  it should "enforce decrementByUnless safely under high contention" in {
+    val c = Counter("contended.slots")
+    val initial = 1000L
+    val floor = 100L
+    c.increment(initial)
+
+    val threads = 8
+    val attemptsPerThread = 500
+    val pool = Executors.newFixedThreadPool(threads)
+    val startLatch = new CountDownLatch(1)
+    val doneLatch = new CountDownLatch(threads)
+
+    try {
+      for (_ <- 0 until threads) {
+        pool.submit(new Runnable {
+          override def run(): Unit = {
+            startLatch.await()
+            var n = 0
+            while (n < attemptsPerThread) {
+              val observed = c.decrementByUnless(1L, floor)
+              observed should be >= floor
+              n += 1
+            }
+            doneLatch.countDown()
+          }
+        })
+      }
+      startLatch.countDown()
+      doneLatch.await(10, TimeUnit.SECONDS) shouldBe true
+      c.value shouldBe floor
+    } finally {
+      pool.shutdownNow()
+    }
+  }
+
   it should "support Java serialization round-trip" in {
     val c = Counter("serializable")
     c.increment(42L)

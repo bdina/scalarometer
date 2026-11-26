@@ -1,18 +1,26 @@
 package com.scalarometer.statistics
 
 import java.io.Serializable
-import java.util.concurrent.atomic.AtomicLong
-import scala.annotation.tailrec
+import java.lang.invoke.{MethodHandles, VarHandle}
+import scala.annotation.{static, tailrec}
+import scala.collection.mutable
 
-@SerialVersionUID(20200724110900L)
-class Counter(val name: String) extends Metric with CountableMetric with Serializable with StatisticsLogging {
-  protected val _count: AtomicLong = new AtomicLong(0L)
+@SerialVersionUID(20261126010000L)
+open class Counter(val name: String) extends Metric with CountableMetric with Serializable with StatisticsLogging {
+  @volatile private var _value: Long = 0L
 
-  def value: Long = _count.get()
-  override def count: Number = java.lang.Long.valueOf(_count.get())
+  def value: Long = _value
+  override def count: Number = java.lang.Long.valueOf(_value)
 
-  def increment(num: Long = 1L): Long = _count.addAndGet(num)
-  def decrement(num: Long = 1L): Long = _count.addAndGet(-num)
+  def increment(num: Long = 1L): Long = {
+    val prev: Long = Counter.ValueHandle.getAndAdd(this, num)
+    prev + num
+  }
+
+  def decrement(num: Long = 1L): Long = {
+    val prev: Long = Counter.ValueHandle.getAndAdd(this, -num)
+    prev - num
+  }
 
   def +=(num: Long): Long = increment(num)
   def -=(num: Long): Long = decrement(num)
@@ -21,34 +29,47 @@ class Counter(val name: String) extends Metric with CountableMetric with Seriali
 
   def decrementByUnless(num: Long, min: Long): Long = {
     if (num <= 0L) {
-      _count.get()
+      _value
     } else {
       @tailrec
-      def loop(): Long = {
-        val current = _count.get()
+      def loop(current: Long): Long = {
         val next = current - num
         val underflowed = ((current ^ num) & (current ^ next)) < 0L
         if (!underflowed && next >= min) {
-          if (_count.compareAndSet(current, next)) next
-          else loop()
+          val witness: Long = Counter.ValueHandle.compareAndExchange(this, current, next)
+          if (witness == current) next
+          else loop(witness)
         } else {
           current
         }
       }
-      loop()
+      loop(_value)
     }
   }
 
-  override def reset(): Unit = _count.set(0L)
-
-  override def data(reset: Boolean = false): Map[String, Number] = {
-    val current = if (reset) _count.getAndSet(0L) else _count.get()
-    Map[String, Number](name -> java.lang.Long.valueOf(current))
+  override def reset(): Unit = {
+    _value = 0L
   }
 
-  override def toString(): String = s"count: ${_count.get()}"
+  protected def getAndResetValue(): Long =
+    Counter.ValueHandle.getAndSet(this, 0L)
+
+  override def data(reset: Boolean = false): Map[String, Number] = {
+    val current = if (reset) getAndResetValue() else _value
+    new scala.collection.immutable.Map.Map1(name, java.lang.Long.valueOf(current))
+  }
+
+  override def appendData(builder: mutable.Builder[(String, Number), ?], reset: Boolean = false): Unit = {
+    val current = if (reset) getAndResetValue() else _value
+    val _ = builder.addOne((name, java.lang.Long.valueOf(current)))
+  }
+
+  override def toString(): String = s"count: ${_value}"
 }
 
 object Counter {
+  @static private val ValueHandle: VarHandle =
+    MethodHandles.lookup().findVarHandle(classOf[Counter], "_value", java.lang.Long.TYPE)
+
   def apply(name: String): Counter = new Counter(name)
 }

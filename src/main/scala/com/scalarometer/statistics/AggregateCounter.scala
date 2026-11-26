@@ -46,14 +46,14 @@ class AggregateCounter(name: String) extends Counter(name) {
     val result = Map[String, Number](
       _nameMax -> java.lang.Long.valueOf(_max),
       _nameMin -> java.lang.Long.valueOf(_min),
-      _nameAvg -> java.lang.Double.valueOf(computeAverage(_count.get(), _samples))
+      _nameAvg -> java.lang.Double.valueOf(computeAverage(value, _samples))
     )
     if (reset) this.reset()
     result
   }
 
   def average: Double = synchronized {
-    computeAverage(_count.get(), _samples)
+    computeAverage(value, _samples)
   }
 
   private def computeAverage(total: Long, sampleCount: Long): Double =
@@ -61,7 +61,7 @@ class AggregateCounter(name: String) extends Counter(name) {
     else 0.0
 
   override def toString(): String = synchronized {
-    s"${super.toString()} min: ${_min} max: ${_max} avg: ${computeAverage(_count.get(), _samples)}"
+    s"${super.toString()} min: ${_min} max: ${_max} avg: ${computeAverage(value, _samples)}"
   }
 }
 
