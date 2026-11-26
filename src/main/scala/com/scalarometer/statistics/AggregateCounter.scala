@@ -1,7 +1,9 @@
 package com.scalarometer.statistics
 
-@SerialVersionUID(20200724110900L)
-class AggregateCounter(name: String) extends Counter(name) {
+import scala.collection.mutable
+
+@SerialVersionUID(20261126010000L)
+open class AggregateCounter(name: String) extends Counter(name) {
   private var _min: Long = 0L
   private var _max: Long = 0L
   private var _samples: Long = 0L
@@ -42,26 +44,72 @@ class AggregateCounter(name: String) extends Counter(name) {
     _samples = 0L
   }
 
-  override def data(reset: Boolean = false): Map[String, Number] = synchronized {
-    val result = Map[String, Number](
-      _nameMax -> java.lang.Long.valueOf(_max),
-      _nameMin -> java.lang.Long.valueOf(_min),
-      _nameAvg -> java.lang.Double.valueOf(computeAverage(value, _samples))
+  override def data(reset: Boolean = false): Map[String, Number] = {
+    var total = 0L
+    var curMin = 0L
+    var curMax = 0L
+    var curSamples = 0L
+    synchronized {
+      total = value
+      curMin = _min
+      curMax = _max
+      curSamples = _samples
+      if (reset) this.reset()
+    }
+    new scala.collection.immutable.Map.Map3(
+      _nameMax,
+      java.lang.Long.valueOf(curMax),
+      _nameMin,
+      java.lang.Long.valueOf(curMin),
+      _nameAvg,
+      java.lang.Double.valueOf(computeAverage(total, curSamples))
     )
-    if (reset) this.reset()
-    result
   }
 
-  def average: Double = synchronized {
-    computeAverage(value, _samples)
+  override def appendData(builder: mutable.Builder[(String, Number), ?], reset: Boolean = false): Unit = {
+    var total = 0L
+    var curMin = 0L
+    var curMax = 0L
+    var curSamples = 0L
+    synchronized {
+      total = value
+      curMin = _min
+      curMax = _max
+      curSamples = _samples
+      if (reset) this.reset()
+    }
+    val _ = builder
+      .addOne((_nameMax, java.lang.Long.valueOf(curMax)))
+      .addOne((_nameMin, java.lang.Long.valueOf(curMin)))
+      .addOne((_nameAvg, java.lang.Double.valueOf(computeAverage(total, curSamples))))
+  }
+
+  def average: Double = {
+    var total = 0L
+    var curSamples = 0L
+    synchronized {
+      total = value
+      curSamples = _samples
+    }
+    computeAverage(total, curSamples)
   }
 
   private def computeAverage(total: Long, sampleCount: Long): Double =
     if (sampleCount > 0L) total.toDouble / sampleCount.toDouble
     else 0.0
 
-  override def toString(): String = synchronized {
-    s"${super.toString()} min: ${_min} max: ${_max} avg: ${computeAverage(value, _samples)}"
+  override def toString(): String = {
+    var total = 0L
+    var curMin = 0L
+    var curMax = 0L
+    var curSamples = 0L
+    synchronized {
+      total = value
+      curMin = _min
+      curMax = _max
+      curSamples = _samples
+    }
+    s"count: $total min: $curMin max: $curMax avg: ${computeAverage(total, curSamples)}"
   }
 }
 

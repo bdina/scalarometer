@@ -90,6 +90,64 @@ class AggregateCounterSpec extends AnyFlatSpec with Matchers {
     ac.value shouldBe 0L
   }
 
+  it should "append aggregate entries directly to a builder with optional atomic reset" in {
+    val ac = AggregateCounter("builder.ops")
+    ac.increment(10L)
+    ac.increment(20L)
+
+    val b1 = Map.newBuilder[String, Number]
+    ac.appendData(b1, reset = false)
+    b1.result() shouldBe Map(
+      "builder.ops.min" -> java.lang.Long.valueOf(10L),
+      "builder.ops.max" -> java.lang.Long.valueOf(20L),
+      "builder.ops.avg" -> java.lang.Double.valueOf(15.0)
+    )
+    ac.samples shouldBe 2L
+
+    val b2 = Map.newBuilder[String, Number]
+    ac.appendData(b2, reset = true)
+    b2.result()("builder.ops.avg").doubleValue() shouldBe 15.0
+    ac.isEmpty shouldBe true
+    ac.value shouldBe 0L
+  }
+
+  it should "remain consistent under concurrent updates, resets, and toString reads" in {
+    val ac = AggregateCounter("concurrent.reset")
+    val threads = 6
+    val perThread = 1000
+    val pool = Executors.newFixedThreadPool(threads)
+    val startLatch = new CountDownLatch(1)
+    val doneLatch = new CountDownLatch(threads)
+
+    try {
+      for (t <- 1 to threads) {
+        pool.submit(new Runnable {
+          override def run(): Unit = {
+            startLatch.await()
+            var i = 0
+            while (i < perThread) {
+              ac.increment(t.toLong)
+              if (i % 100 == 0) {
+                val snap = ac.data(reset = t == 1)
+                snap.size shouldBe 3
+                ac.toString() should startWith("count: ")
+              }
+              i += 1
+            }
+            doneLatch.countDown()
+          }
+        })
+      }
+      startLatch.countDown()
+      doneLatch.await(10, TimeUnit.SECONDS) shouldBe true
+      val finalData = ac.data(reset = true)
+      finalData.keySet shouldBe Set("concurrent.reset.min", "concurrent.reset.max", "concurrent.reset.avg")
+      ac.isEmpty shouldBe true
+    } finally {
+      pool.shutdownNow()
+    }
+  }
+
   it should "support Java serialization round-trip" in {
     val ac = AggregateCounter("ser")
     ac.increment(5L)
