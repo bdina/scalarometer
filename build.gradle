@@ -28,7 +28,7 @@ plugins {
 }
 
 group = 'com.scalarometer'
-version = gitVersion()
+version = file('.git').exists() ? gitVersion() : '0.0.0-bootstrap'
 
 repositories {
   mavenCentral()
@@ -64,9 +64,17 @@ processResources {
   exclude '**/*.sample'
 }
 
+def enableTestReports = providers.gradleProperty('testReports').map { it.toBoolean() }.orElse(false)
+
 test {
   useJUnit()
+  minHeapSize = '128m'
+  maxHeapSize = '512m'
   jvmArgs '--sun-misc-unsafe-memory-access=allow', '-XX:+UseCompactObjectHeaders'
+  reports {
+    html.required = enableTestReports
+    junitXml.required = enableTestReports
+  }
   testLogging {
     events 'passed', 'skipped', 'failed'
     showStandardStreams = false
@@ -95,6 +103,21 @@ tasks.register('repl', JavaExec) {
   args '-usejavacp'
 }
 
+tasks.register('resolveDependencies') {
+  group = 'build setup'
+  description = 'Resolves compile, runtime, and test classpaths (excluding replCompiler) for offline and container layer priming'
+  doLast {
+    ['compileClasspath', 'runtimeClasspath', 'testCompileClasspath', 'testRuntimeClasspath'].each { cfgName ->
+      configurations.named(cfgName).get().resolve()
+    }
+  }
+}
+
+tasks.withType(AbstractArchiveTask).configureEach {
+  preserveFileTimestamps = false
+  reproducibleFileOrder = true
+}
+
 jar {
   manifest {
     attributes(
@@ -112,6 +135,7 @@ shadowJar {
       'Implementation-Version': version
     )
   }
+  exclude 'META-INF/*.SF', 'META-INF/*.DSA', 'META-INF/*.RSA', 'META-INF/maven/**'
   mergeServiceFiles()
 }
 
@@ -146,6 +170,15 @@ def scalaCompilerParams = [
 tasks.withType(org.gradle.api.tasks.scala.ScalaCompile).configureEach {
   scalaCompileOptions.deprecation = true
   scalaCompileOptions.additionalParameters = scalaCompilerParams
+  scalaCompileOptions.forkOptions.with {
+    memoryInitialSize = '256m'
+    memoryMaximumSize = '1536m'
+    jvmArgs = [
+      '-XX:+UseParallelGC',
+      '-XX:+UseCompactObjectHeaders',
+      '-XX:TieredStopAtLevel=1'
+    ]
+  }
 }
 
 tasks.named('compileTestScala').configure {
