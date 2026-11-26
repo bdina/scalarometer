@@ -1,7 +1,7 @@
 package com.scalarometer.statistics
 
 @SerialVersionUID(20200724110900L)
-class AggregateCounter(name: String) extends Counter(name) with StatisticsLogging {
+class AggregateCounter(name: String) extends Counter(name) {
   private var _min: Long = 0L
   private var _max: Long = 0L
   private var _samples: Long = 0L

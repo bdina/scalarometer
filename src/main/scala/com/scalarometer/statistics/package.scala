@@ -1,11 +1,27 @@
 package com.scalarometer.statistics
 
 import java.lang.management.ManagementFactory
-import java.util.logging.Logger
+import java.util.logging.{Level, Logger}
 import scala.util.control.NonFatal
 
+private object LoggerCache extends ClassValue[Logger] {
+  override def computeValue(cls: Class[?]): Logger = Logger.getLogger(cls.getName)
+}
+
 trait StatisticsLogging {
-  @transient lazy val logger: Logger = Logger.getLogger(this.getClass.getName)
+  def logger: Logger = LoggerCache.get(this.getClass)
+
+  inline protected def logFine(inline msg: String): Unit = {
+    if (logger.isLoggable(Level.FINE)) logger.fine(msg)
+  }
+
+  inline protected def logFinest(inline msg: String): Unit = {
+    if (logger.isLoggable(Level.FINEST)) logger.finest(msg)
+  }
+
+  inline protected def logInfo(inline msg: String): Unit = {
+    if (logger.isLoggable(Level.INFO)) logger.info(msg)
+  }
 }
 
 trait CountableMetric {
@@ -30,23 +46,23 @@ trait Statistics extends StatisticsLogging {
   protected def readerBean(): ReaderBean = ReaderBean()
 
   def initializeJmx(): Unit = {
-    if (System.getProperty("com.sun.management.jmxremote") == null) {
+    if (System.getProperty("com.sun.management.jmxremote") eq null) {
       logger.severe("JMX remote is disabled")
     } else {
       val mbs = ManagementFactory.getPlatformMBeanServer()
       try {
         val bean = readerBean()
         val _ = mbs.registerMBean(bean, bean.objectName)
-        logger.info("JMX MBean successfully registered")
+        logInfo("JMX MBean successfully registered")
       } catch {
         case NonFatal(e) =>
           logger.severe(s"Failed to register JMX Agent: ${e.getMessage}")
       }
-      Option(System.getProperty("com.sun.management.jmxremote.port")) match {
-        case Some(portString) =>
-          logger.info(s"JMX running on port: $portString")
-        case None =>
-          logger.finest("JMX port undefined")
+      val portString = System.getProperty("com.sun.management.jmxremote.port")
+      if (portString ne null) {
+        logInfo(s"JMX running on port: $portString")
+      } else {
+        logFinest("JMX port undefined")
       }
     }
   }
@@ -57,7 +73,7 @@ trait Statistics extends StatisticsLogging {
       val objectName = readerBean().objectName
       if (mbs.isRegistered(objectName)) {
         mbs.unregisterMBean(objectName)
-        logger.info("JMX MBean successfully unregistered")
+        logInfo("JMX MBean successfully unregistered")
       }
     } catch {
       case NonFatal(e) =>

@@ -33,7 +33,7 @@ class Histogram(name: String, val max_snapshots: Int = 1024) extends Counter(nam
       prev = current
     } else if (!capLogged) {
       capLogged = true
-      logger.fine(s"Histogram '$name' reached max_snapshots cap ($max_snapshots); dropping additional snapshots until reset")
+      logFine(s"Histogram '$name' reached max_snapshots cap ($max_snapshots); dropping additional snapshots until reset")
     }
   }
 

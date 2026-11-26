@@ -29,25 +29,25 @@ class Registry extends Statistics with Iterable[Metric] {
 
   def registerMetric(metric: Metric): Set[Metric] = {
     val updated = countersRef.updateAndGet(_ + metric)
-    logger.fine(s"Registered metric '${metric.name}' (total resettable: ${updated.size})")
+    logFine(s"Registered metric '${metric.name}' (total resettable: ${updated.size})")
     updated
   }
 
   def unregisterMetric(metric: Metric): Set[Metric] = {
     val updated = countersRef.updateAndGet(_ - metric)
-    logger.fine(s"Unregistered metric '${metric.name}' (total resettable: ${updated.size})")
+    logFine(s"Unregistered metric '${metric.name}' (total resettable: ${updated.size})")
     updated
   }
 
   def registerFixedMetric(metric: Metric): Set[Metric] = {
     val updated = fixedCountersRef.updateAndGet(_ + metric)
-    logger.fine(s"Registered fixed metric '${metric.name}' (total fixed: ${updated.size})")
+    logFine(s"Registered fixed metric '${metric.name}' (total fixed: ${updated.size})")
     updated
   }
 
   def unregisterFixedMetric(metric: Metric): Set[Metric] = {
     val updated = fixedCountersRef.updateAndGet(_ - metric)
-    logger.fine(s"Unregistered fixed metric '${metric.name}' (total fixed: ${updated.size})")
+    logFine(s"Unregistered fixed metric '${metric.name}' (total fixed: ${updated.size})")
     updated
   }
 
@@ -65,7 +65,7 @@ class Registry extends Statistics with Iterable[Metric] {
   def clear(): Unit = {
     countersRef.set(Set.empty)
     fixedCountersRef.set(Set.empty)
-    logger.fine("Cleared all metrics from registry")
+    logFine("Cleared all metrics from registry")
   }
 
   def metric(name: String): Option[Metric] = countersRef.get().find(_.name == name)
