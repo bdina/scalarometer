@@ -1,25 +1,87 @@
 package com.scalarometer.statistics
 
 import java.util.concurrent.atomic.AtomicReference
+import scala.annotation.tailrec
 
-class Registry extends Statistics with Iterable[Metric] {
-  private val countersRef: AtomicReference[Set[Metric]] = new AtomicReference(Set.empty)
-  private val fixedCountersRef: AtomicReference[Set[Metric]] = new AtomicReference(Set.empty)
+open class Registry extends Statistics with Iterable[Metric] {
+  import Registry.{EmptyBucket, MetricBucket}
+
+  private val countersRef: AtomicReference[MetricBucket] = new AtomicReference(EmptyBucket)
+  private val fixedCountersRef: AtomicReference[MetricBucket] = new AtomicReference(EmptyBucket)
 
   override protected def readerBean(): ReaderBean = ReaderBean(this)
 
-  def metrics: Set[Metric] = countersRef.get()
-  def fixedMetrics: Set[Metric] = fixedCountersRef.get()
-  def allMetrics: Set[Metric] = countersRef.get() ++ fixedCountersRef.get()
+  def metrics: Set[Metric] = countersRef.get().metrics
+  def fixedMetrics: Set[Metric] = fixedCountersRef.get().metrics
 
-  override def iterator: Iterator[Metric] = allMetrics.iterator
+  def allMetrics: Set[Metric] = {
+    val resettable = countersRef.get().metrics
+    val fixed = fixedCountersRef.get().metrics
+    if (fixed.isEmpty) resettable
+    else if (resettable.isEmpty) fixed
+    else resettable ++ fixed
+  }
+
+  override def isEmpty: Boolean =
+    countersRef.get().metrics.isEmpty && fixedCountersRef.get().metrics.isEmpty
+
+  override def size: Int = {
+    val resettable = countersRef.get().metrics
+    val fixed = fixedCountersRef.get().metrics
+    if (fixed.isEmpty) resettable.size
+    else if (resettable.isEmpty) fixed.size
+    else {
+      var count = resettable.size
+      val it = fixed.iterator
+      while (it.hasNext) {
+        if (!resettable.contains(it.next())) count += 1
+      }
+      count
+    }
+  }
+
+  override def iterator: Iterator[Metric] = {
+    val resettable = countersRef.get().metrics
+    val fixed = fixedCountersRef.get().metrics
+    if (fixed.isEmpty) resettable.iterator
+    else if (resettable.isEmpty) fixed.iterator
+    else resettable.iterator ++ fixed.iterator.filterNot(resettable.contains)
+  }
+
+  override def foreach[U](f: Metric => U): Unit = {
+    val resettable = countersRef.get().metrics
+    val fixed = fixedCountersRef.get().metrics
+    resettable.foreach(f)
+    if (resettable.isEmpty) {
+      fixed.foreach(f)
+    } else if (fixed.nonEmpty) {
+      val it = fixed.iterator
+      while (it.hasNext) {
+        val m = it.next()
+        if (!resettable.contains(m)) {
+          val _ = f(m)
+        }
+      }
+    }
+  }
 
   def stats(reset: Boolean = false): Map[String, Number] = {
-    val resettableStats = countersRef.get().foldLeft(Map.empty[String, Number]) { (acc, m) =>
-      acc ++ m.data(reset)
-    }
-    fixedCountersRef.get().foldLeft(resettableStats) { (acc, m) =>
-      acc ++ m.data(reset = false)
+    val resettable = countersRef.get().metrics
+    val fixed = fixedCountersRef.get().metrics
+    if (resettable.isEmpty && fixed.isEmpty) {
+      Map.empty
+    } else {
+      val builder = Map.newBuilder[String, Number]
+      builder.sizeHint(resettable.size + fixed.size)
+      val it1 = resettable.iterator
+      while (it1.hasNext) {
+        it1.next().appendData(builder, reset)
+      }
+      val it2 = fixed.iterator
+      while (it2.hasNext) {
+        it2.next().appendData(builder, reset = false)
+      }
+      builder.result()
     }
   }
 
@@ -28,25 +90,25 @@ class Registry extends Statistics with Iterable[Metric] {
   def registerFixedCounter(counter: Counter): Set[Metric] = registerFixedMetric(counter)
 
   def registerMetric(metric: Metric): Set[Metric] = {
-    val updated = countersRef.updateAndGet(_ + metric)
+    val updated = registerIn(countersRef, metric)
     logFine(s"Registered metric '${metric.name}' (total resettable: ${updated.size})")
     updated
   }
 
   def unregisterMetric(metric: Metric): Set[Metric] = {
-    val updated = countersRef.updateAndGet(_ - metric)
+    val updated = unregisterFrom(countersRef, metric)
     logFine(s"Unregistered metric '${metric.name}' (total resettable: ${updated.size})")
     updated
   }
 
   def registerFixedMetric(metric: Metric): Set[Metric] = {
-    val updated = fixedCountersRef.updateAndGet(_ + metric)
+    val updated = registerIn(fixedCountersRef, metric)
     logFine(s"Registered fixed metric '${metric.name}' (total fixed: ${updated.size})")
     updated
   }
 
   def unregisterFixedMetric(metric: Metric): Set[Metric] = {
-    val updated = fixedCountersRef.updateAndGet(_ - metric)
+    val updated = unregisterFrom(fixedCountersRef, metric)
     logFine(s"Unregistered fixed metric '${metric.name}' (total fixed: ${updated.size})")
     updated
   }
@@ -62,22 +124,131 @@ class Registry extends Statistics with Iterable[Metric] {
     this
   }
 
+  def ++=(items: IterableOnce[Metric]): this.type = {
+    val materialized = materialize(items)
+    val updated = registerAllIn(countersRef, materialized)
+    logFine(s"Bulk registered metrics (total resettable: ${updated.size})")
+    this
+  }
+
+  def --=(items: IterableOnce[Metric]): this.type = {
+    val materialized = materialize(items)
+    val updatedResettable = unregisterAllFrom(countersRef, materialized)
+    val updatedFixed = unregisterAllFrom(fixedCountersRef, materialized)
+    logFine(s"Bulk unregistered metrics (total resettable: ${updatedResettable.size}, total fixed: ${updatedFixed.size})")
+    this
+  }
+
   def clear(): Unit = {
-    countersRef.set(Set.empty)
-    fixedCountersRef.set(Set.empty)
+    countersRef.set(EmptyBucket)
+    fixedCountersRef.set(EmptyBucket)
     logFine("Cleared all metrics from registry")
   }
 
-  def metric(name: String): Option[Metric] = countersRef.get().find(_.name == name)
-  def fixedMetric(name: String): Option[Metric] = fixedCountersRef.get().find(_.name == name)
-  def get(name: String): Option[Metric] = metric(name).orElse(fixedMetric(name))
-  def contains(name: String): Boolean = get(name).isDefined
+  def metric(name: String): Option[Metric] = countersRef.get().byName.get(name)
+  def fixedMetric(name: String): Option[Metric] = fixedCountersRef.get().byName.get(name)
+
+  def get(name: String): Option[Metric] = {
+    val found = countersRef.get().byName.get(name)
+    if (found.isDefined) found else fixedCountersRef.get().byName.get(name)
+  }
+
+  def contains(name: String): Boolean =
+    countersRef.get().byName.contains(name) || fixedCountersRef.get().byName.contains(name)
 
   override def toString(): String =
-    s"Registry(metrics=${countersRef.get().size}, fixedMetrics=${fixedCountersRef.get().size})"
+    s"Registry(metrics=${countersRef.get().metrics.size}, fixedMetrics=${fixedCountersRef.get().metrics.size})"
+
+  private def materialize(items: IterableOnce[Metric]): Iterable[Metric] = items match {
+    case iterable: Iterable[Metric @unchecked] => iterable
+    case other                                 => other.iterator.toVector
+  }
+
+  @tailrec
+  private def registerIn(ref: AtomicReference[MetricBucket], metric: Metric): Set[Metric] = {
+    val current = ref.get()
+    val next = current.register(metric)
+    if ((next eq current) || ref.compareAndSet(current, next)) next.metrics
+    else registerIn(ref, metric)
+  }
+
+  @tailrec
+  private def unregisterFrom(ref: AtomicReference[MetricBucket], metric: Metric): Set[Metric] = {
+    val current = ref.get()
+    val next = current.unregister(metric)
+    if ((next eq current) || ref.compareAndSet(current, next)) next.metrics
+    else unregisterFrom(ref, metric)
+  }
+
+  @tailrec
+  private def registerAllIn(ref: AtomicReference[MetricBucket], items: Iterable[Metric]): Set[Metric] = {
+    val current = ref.get()
+    val next = current.registerAll(items)
+    if ((next eq current) || ref.compareAndSet(current, next)) next.metrics
+    else registerAllIn(ref, items)
+  }
+
+  @tailrec
+  private def unregisterAllFrom(ref: AtomicReference[MetricBucket], items: Iterable[Metric]): Set[Metric] = {
+    val current = ref.get()
+    val next = current.unregisterAll(items)
+    if ((next eq current) || ref.compareAndSet(current, next)) next.metrics
+    else unregisterAllFrom(ref, items)
+  }
 }
 
 object Registry {
+  private final class MetricBucket(val metrics: Set[Metric], val byName: Map[String, Metric]) {
+    def register(metric: Metric): MetricBucket = {
+      if (metrics.contains(metric)) this
+      else new MetricBucket(metrics + metric, byName.updated(metric.name, metric))
+    }
+
+    def unregister(metric: Metric): MetricBucket = {
+      if (!metrics.contains(metric)) {
+        this
+      } else {
+        val updatedMetrics = metrics - metric
+        val updatedByName = byName.get(metric.name) match {
+          case Some(existing) if existing eq metric =>
+            updatedMetrics.find(_.name == metric.name) match {
+              case Some(replacement) => byName.updated(metric.name, replacement)
+              case None              => byName - metric.name
+            }
+          case _ => byName
+        }
+        new MetricBucket(updatedMetrics, updatedByName)
+      }
+    }
+
+    def registerAll(items: Iterable[Metric]): MetricBucket = {
+      val it = items.iterator
+      var curMetrics = metrics
+      var curByName = byName
+      var changed = false
+      while (it.hasNext) {
+        val m = it.next()
+        if (!curMetrics.contains(m)) {
+          curMetrics = curMetrics + m
+          curByName = curByName.updated(m.name, m)
+          changed = true
+        }
+      }
+      if (changed) new MetricBucket(curMetrics, curByName) else this
+    }
+
+    def unregisterAll(items: Iterable[Metric]): MetricBucket = {
+      val it = items.iterator
+      var cur = this
+      while (it.hasNext) {
+        cur = cur.unregister(it.next())
+      }
+      cur
+    }
+  }
+
+  private val EmptyBucket: MetricBucket = new MetricBucket(Set.empty, Map.empty)
+
   val global: Registry = Registry()
   def apply(): Registry = new Registry()
 }

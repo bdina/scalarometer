@@ -77,6 +77,73 @@ class RegistrySpec extends AnyFlatSpec with Matchers {
     registry.isEmpty shouldBe true
   }
 
+  it should "support bulk ++= / --=, deduplicated Iterable ops, empty stats fast path, and duplicate names" in {
+    val registry = Registry()
+    registry.stats() should be theSameInstanceAs Map.empty[String, Number]
+    registry.isEmpty shouldBe true
+    registry.size shouldBe 0
+
+    val c1 = Counter("m1")
+    val c2 = Counter("m2")
+    val c3 = Counter("m3")
+    val h1 = Histogram("h1")
+    val ac1 = AggregateCounter("ac1")
+    val g1 = Gauge.long("g1")(77L)
+
+    c1.increment(3L)
+    h1.incrementByAndRecordSnapshot(10L)
+    ac1.increment(5L)
+
+    // Bulk add from a single-use Iterator as well as List
+    registry ++= Iterator(c1, c2)
+    registry ++= List(h1, ac1, g1)
+    registry.registerFixedMetric(c3)
+    // Register same instance in both buckets to verify deduplicated size/iterator/foreach
+    registry.registerFixedMetric(c1)
+
+    registry.size shouldBe 6
+    registry.allMetrics.size shouldBe 6
+    registry.iterator.toList.size shouldBe 6
+    var visited = 0
+    registry.foreach(_ => visited += 1)
+    visited shouldBe 6
+
+    val snap = registry.stats(reset = false)
+    snap("m1").longValue() shouldBe 3L
+    snap("h1").longValue() shouldBe 10L
+    snap("h1.0.5").doubleValue() shouldBe 10.0
+    snap("ac1.avg").doubleValue() shouldBe 5.0
+    snap("g1").longValue() shouldBe 77L
+
+    // Duplicate metric names in the same bucket should fall back cleanly on unregister
+    val dupA = Counter("dup")
+    val dupB = Counter("dup")
+    registry += dupA += dupB
+    registry.metric("dup") shouldBe defined
+    registry.unregisterMetric(dupB)
+    registry.metric("dup") shouldBe Some(dupA)
+    registry.unregisterMetric(dupA)
+    registry.metric("dup") shouldBe None
+
+    // Bulk remove across both resettable and fixed buckets
+    registry --= List(c1, c3, g1)
+    registry.contains("m1") shouldBe false
+    registry.contains("m3") shouldBe false
+    registry.contains("g1") shouldBe false
+    registry.contains("m2") shouldBe true
+    registry.size shouldBe 3
+
+    // Fixed-only fast paths
+    registry.clear()
+    registry.registerFixedMetric(c3)
+    registry.size shouldBe 1
+    registry.allMetrics shouldBe Set[Metric](c3)
+    registry.iterator.toList shouldBe List[Metric](c3)
+    var fixedVisited = 0
+    registry.foreach(_ => fixedVisited += 1)
+    fixedVisited shouldBe 1
+  }
+
   it should "support concurrent metric registration and stats snapshots" in {
     val registry = Registry()
     val threads = 6
